@@ -191,22 +191,17 @@ async function main() {
   await write(pn.readFrame(pn.REG.BOARD_ERROR));
   await delay(100);
 
-  // Перевірка рег.15 ДО будь-якого руху — раніше цей скрипт не читав його
-  // взагалі, хоча CLAUDE.md §11 явно вимагає це перед пуском. Плата приймає
-  // й ACK-ить SetMotorSettings навіть коли фізично заблокована (реле клацає,
-  // status у рег.6 залишається 0) — якщо StopButton/EmergencyStopButton
-  // натиснуті, руху не буде незалежно від того, що ми шлемо в рег.7.
-  console.log('Перевірка рег.15 (StopButton/EmergencyStopButton) перед стартом...');
+  // Рання перевірка рег.15 — лише інформаційна. На живій платі (2026-07-25)
+  // тут виявили stop=true eStop=true reset=true одночасно, ще ДО жодного
+  // ResetErrorMask — схоже на "клямку", яку знімає саме reset-послідовність
+  // (так само, як вона знімає маску помилок рег.4), а не на живий стан
+  // фізичної кнопки: у заводській панелі просто "Старт" — і їде, а Start
+  // якраз і виконує цю ж послідовність (FeedingSystem.BwBoardDE_DoWork).
+  // Тому тут більше НЕ абортуємо — рішучу перевірку робимо нижче, ПІСЛЯ
+  // повної boot-послідовності з усіма ResetErrorMask.
+  console.log('Перевірка рег.15 (інформаційно, до reset-послідовності)...');
   await write(pn.readFrame(pn.REG.DIGITAL_IN));
   await delay(150);
-  if (inputs && (inputs.stopButton || inputs.emergencyStop)) {
-    console.log(`\nСТОП: рег.15 показує stop=${inputs.stopButton} eStop=${inputs.emergencyStop} — фізичну кнопку не відпущено. Відпусти E-Stop/Stop і перезапусти.`);
-    port.close(() => process.exit(1));
-    return;
-  }
-  if (!inputs) {
-    console.log('УВАГА: не отримав відповідь на рег.15 — не можу підтвердити стан E-Stop/Stop. Перевір лінію.');
-  }
 
   const resetAll = () =>
     write(pn.resetErrorMaskFrame({
@@ -232,6 +227,22 @@ async function main() {
   await resetAll();
   await write(pn.motorReqMaskFrame(REQUIRED_MASK));
   await resetAll();
+
+  // Рішуча перевірка рег.15 — ПІСЛЯ повної boot-послідовності. Якщо клямка
+  // не знялась і зараз, це вже не "стан до reset", а справжня блокуюча
+  // умова — тут абортуємо.
+  console.log('Перевірка рег.15 після boot-послідовності...');
+  await write(pn.readFrame(pn.REG.DIGITAL_IN));
+  await delay(150);
+  if (inputs && (inputs.stopButton || inputs.emergencyStop)) {
+    console.log(`\nСТОП: рег.15 після reset все одно показує stop=${inputs.stopButton} eStop=${inputs.emergencyStop} — це вже не "стан до скидання". Перевір фізичну кнопку/роз'єм.`);
+    await write(pn.motorPowerFrame(false));
+    port.close(() => process.exit(1));
+    return;
+  }
+  if (!inputs) {
+    console.log('УВАГА: не отримав відповідь на рег.15 після reset — не можу підтвердити стан E-Stop/Stop.');
+  }
 
   keepaliveTimer = setInterval(() => {
     if (!stopping) write(pn.readFrame(pn.REG.KEEPALIVE));
