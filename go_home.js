@@ -31,6 +31,12 @@ const BAUD = Number(process.env.BAUD) || 115200;
 const SPEED = Number(process.env.SPEED) || 100;
 const DIRECTION = process.env.DIRECTION !== undefined ? Number(process.env.DIRECTION) : 1; // напрямок "назад" — звірити на місці
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS) || 60000; // запобіжник, якщо датчик не спрацює
+// Power/PowerDelay (байти 3/4 рег.7) — ліміт струму + затримка спрацювання
+// захисту. Скріншот настройок показує реальні ліміти Drive-моторів ~10А;
+// наше попереднє power=60/powerDelay=0 могло тригерити захист миттєво на
+// пусковому струмі, ще до видимого руху. Піднято за замовчуванням.
+const POWER = Number(process.env.POWER) || 200;
+const POWER_DELAY = Number(process.env.POWER_DELAY) || 50;
 
 const DRIVE_BOTH = pn.MOTOR_IDS.Drive1 | pn.MOTOR_IDS.Drive2; // = 3
 const ALL_MASK = Object.values(pn.MOTOR_IDS).reduce((m, id) => m | id, 0);
@@ -66,20 +72,34 @@ async function main() {
 
   let rxBuf = Buffer.alloc(0);
   let sensors = null;
+  let boardError = null;
+  let lastPrintedError = null;
   port.on('data', (chunk) => {
     rxBuf = Buffer.concat([rxBuf, chunk]);
     const { frames, rest } = pn.extractFrames(rxBuf);
     rxBuf = rest;
     for (const raw of frames) {
       const msg = pn.parseFrame(raw);
-      if (msg && msg.register === pn.REG.SENSORS && msg.data.length >= 7) {
+      if (!msg) continue;
+      if (msg.register === pn.REG.SENSORS && msg.data.length >= 7) {
         sensors = pn.decodeSensors(msg.data);
+      }
+      if (msg.register === pn.REG.BOARD_ERROR) {
+        boardError = pn.decodeBoardError(msg.data);
+        const key = JSON.stringify(boardError.raw);
+        if (key !== lastPrintedError) {
+          lastPrintedError = key;
+          console.log(`\n[рег.4 маска помилок] int=${boardError.internalErrorMask} lost=${boardError.motorLostCommunMask} protect=${boardError.motorProtectionTriggeringMask} raw=[${boardError.raw}]`);
+        }
       }
     }
   });
 
   function driveBoth(status, direction) {
-    return write(pn.motorFrame({ motorId: DRIVE_BOTH, status, speed: status ? SPEED : 0, direction, power: 60 }));
+    return write(pn.motorFrame({
+      motorId: DRIVE_BOTH, status, speed: status ? SPEED : 0, direction,
+      power: POWER, powerDelay: POWER_DELAY,
+    }));
   }
 
   let stopping = false;
@@ -98,6 +118,9 @@ async function main() {
   process.on('SIGINT', () => emergencyStop('SIGINT (Ctrl+C)'));
   process.on('uncaughtException', (e) => emergencyStop(`помилка: ${e.message}`));
 
+  console.log(`Power=${POWER}, PowerDelay=${POWER_DELAY}`);
+  await write(pn.readFrame(pn.REG.BOARD_ERROR));
+  await delay(100);
   console.log('Ініціалізація: скид помилок + маска задіяних моторів (рег.25)...');
   await write(pn.resetErrorMaskFrame({
     resetIntError: true, resetSafetyStop: true, resetMotorLostComm: true, resetMotorProtect: true,
@@ -122,6 +145,7 @@ async function main() {
   while (!stopping && Date.now() < deadline) {
     await driveBoth(1, DIRECTION);
     await write(pn.readFrame(pn.REG.SENSORS));
+    await write(pn.readFrame(pn.REG.BOARD_ERROR));
     await delay(150);
 
     const isHome = !!(sensors && sensors.inHomeMarker);
