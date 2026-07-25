@@ -9,7 +9,8 @@
     "mock": "MOCK=1 node server.js",
     "verify": "node verify.js",
     "scan": "node scan.js",
-    "motor-test": "node motor_test.js"
+    "motor-test": "node motor_test.js",
+    "go-home": "node go_home.js"
   },
   "dependencies": {
     "serialport": "^12.0.0",

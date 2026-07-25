@@ -19,7 +19,10 @@ const pn = require('./powernet');
 
 const PORT_NAME = process.env.PORT_NAME || 'COM3';
 const BAUD = Number(process.env.BAUD) || 115200;
-const SPEED = Number(process.env.SPEED) || 15; // 10-20 — безпечно для першого тесту
+// Заводський формула швидкості ((MotorDriveSpeed-32)*CartSpeedPercent+3200)/100
+// для типових налаштувань дає ~120-190, а не 10-20 — малі значення, схоже,
+// нижче порогу зрушення мотора під навантаженням (перевірено на практиці).
+const SPEED = Number(process.env.SPEED) || 100;
 const RUN_MS = Number(process.env.RUN_MS) || 3000;
 const PAUSE_MS = 1000; // пауза між кроками — встигнути побачити результат / зупинити руками
 
@@ -113,8 +116,9 @@ async function main() {
     await delay(PAUSE_MS);
   }
 
-  // Drive1+Drive2 рухають візок по рейці — тільки разом
-  const driveIds = [pn.MOTOR_IDS.Drive1, pn.MOTOR_IDS.Drive2];
+  // Drive1+Drive2 рухають візок по рейці — ОДНІЄЮ командою з MotorID=3 (=1|2),
+  // так само як заводський Drive.Forward3/Backward3, а не двома окремими
+  const driveIds = [pn.MOTOR_IDS.Drive1 | pn.MOTOR_IDS.Drive2];
   await runMotors(driveIds, 0, 'Drive1+Drive2 вперед');
   await runMotors(driveIds, 1, 'Drive1+Drive2 назад');
 

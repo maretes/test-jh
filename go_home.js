@@ -24,7 +24,11 @@ const pn = require('./powernet');
 
 const PORT_NAME = process.env.PORT_NAME || 'COM3';
 const BAUD = Number(process.env.BAUD) || 115200;
-const SPEED = Number(process.env.SPEED) || 15; // 10-20 — безпечно для першого тесту
+// Заводський DoForward/DoBackward рахує Speed за формулою
+// ((MotorDriveSpeed-32)*CartSpeedPercent+3200)/100 — для типових налаштувань
+// (MotorDriveSpeed~255, CartSpeedLow=40%) це виходить ~120, а не 10-20.
+// Малі значення (~15), схоже, нижче порогу зрушення мотора під навантаженням.
+const SPEED = Number(process.env.SPEED) || 100;
 const DIRECTION = process.env.DIRECTION !== undefined ? Number(process.env.DIRECTION) : 1; // напрямок "назад" — звірити на місці
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS) || 60000; // запобіжник, якщо датчик не спрацює
 
