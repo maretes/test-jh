@@ -103,23 +103,39 @@ async function main() {
           console.log(`\n[рег.4 маска помилок] int=${boardError.internalErrorMask} lost=${boardError.motorLostCommunMask} protect=${boardError.motorProtectionTriggeringMask} raw=[${boardError.raw}]`);
         }
       }
-      if (msg.register === pn.REG.MOTOR_STATUS_BY_ID && !msg.isWrite && msg.data.length >= 7) {
-        const id = pendingMotorStatus.shift();
-        const fb = pn.decodeMotorStatus(msg.data);
-        const key = JSON.stringify(fb);
-        if (key !== lastPrintedMotorStatus[id]) {
-          lastPrintedMotorStatus[id] = key;
-          console.log(`\n[рег.6 статус мотора] id=${id} status=${fb.status} speed=${fb.speed} power=${fb.power} dir=${fb.direction}`);
+      if (msg.register === pn.REG.MOTOR_STATUS_BY_ID && !msg.isWrite) {
+        const id = pendingMotorStatus.shift(); // знімаємо завжди, навіть на порожню відповідь
+        if (msg.data.length >= 7) {
+          const fb = pn.decodeMotorStatus(msg.data);
+          const key = JSON.stringify(fb);
+          if (key !== lastPrintedMotorStatus[id]) {
+            lastPrintedMotorStatus[id] = key;
+            console.log(`\n[рег.6 статус мотора] id=${id} status=${fb.status} speed=${fb.speed} power=${fb.power} dir=${fb.direction}`);
+          }
+        } else if (lastPrintedMotorStatus[id] !== 'empty') {
+          lastPrintedMotorStatus[id] = 'empty';
+          console.log(`\n[рег.6 статус мотора] id=${id} ПОРОЖНЯ ВІДПОВІДЬ (невідомий/невалідний ID?)`);
         }
       }
     }
   });
 
+  // COMBINED_ID=1 (дефолт): MotorID=3 (=1|2) в одній команді — так шле
+  // заводський Drive.Forward3/Backward3, але рег.6 показує, що плата це
+  // ігнорує (status завжди 0 після запису). SEPARATE=0: дві окремі команди
+  // (ID=1, ID=2) одна за одною, як діагностика — раніше без правильної
+  // boot-послідовності теж не рухало, перевіряємо ще раз тепер, коли вона є.
+  const COMBINED_ID = process.env.COMBINED_ID !== '0';
+  console.log(`Режим адресації Drive1+Drive2: ${COMBINED_ID ? 'комбінована команда MotorID=3' : 'дві окремі команди ID=1 і ID=2'}`);
+
   function driveBoth(status, direction) {
-    return write(pn.motorFrame({
-      motorId: DRIVE_BOTH, status, speed: status ? SPEED : 0, direction,
-      power: POWER, powerDelay: POWER_DELAY,
-    }));
+    const speed = status ? SPEED : 0;
+    if (COMBINED_ID) {
+      return write(pn.motorFrame({ motorId: DRIVE_BOTH, status, speed, direction, power: POWER, powerDelay: POWER_DELAY }));
+    }
+    return write(pn.motorFrame({ motorId: pn.MOTOR_IDS.Drive1, status, speed, direction, power: POWER, powerDelay: POWER_DELAY })).then(() =>
+      write(pn.motorFrame({ motorId: pn.MOTOR_IDS.Drive2, status, speed, direction, power: POWER, powerDelay: POWER_DELAY }))
+    );
   }
 
   function readMotorStatus(id) {
