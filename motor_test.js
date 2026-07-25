@@ -43,10 +43,18 @@ async function main() {
   });
   console.log('Порт відкрито.\n');
 
+  // послідовна черга запису — як у server.js: кадри не можна змішувати,
+  // а плата, схоже, має watchdog і глушить мотор, якщо трафік не триває,
+  // тож фонового keepalive і одноразового запису недостатньо
+  let chain = Promise.resolve();
   function write(frame) {
-    return new Promise((resolve) => {
-      port.write(frame, () => port.drain(() => setTimeout(resolve, 20)));
-    });
+    chain = chain.then(
+      () =>
+        new Promise((resolve) => {
+          port.write(frame, () => port.drain(() => setTimeout(resolve, 10)));
+        })
+    );
+    return chain;
   }
 
   async function stopAll() {
@@ -56,10 +64,12 @@ async function main() {
   }
 
   let stopping = false;
+  let keepaliveTimer = null; // призначається нижче; clearInterval(null) безпечний
   async function emergencyStop(reason) {
     if (stopping) return;
     stopping = true;
     console.log(`\nАварійна зупинка: ${reason}`);
+    clearInterval(keepaliveTimer);
     try {
       await stopAll();
       await write(pn.motorPowerFrame(false));
@@ -80,13 +90,22 @@ async function main() {
   await write(pn.motorPowerFrame(true));
   await delay(300);
 
+  // фоновий keepalive протягом усього тесту — без нього плата може
+  // вважати, що майстра нема, і сама скидати стан
+  keepaliveTimer = setInterval(() => {
+    if (!stopping) write(pn.readFrame(pn.REG.KEEPALIVE));
+  }, 300);
+
   async function runMotors(ids, direction, label) {
     if (stopping) return;
     console.log(`-> ${label} (motorId=[${ids}], напрямок=${direction})`);
-    for (const id of ids) {
-      await write(pn.motorFrame({ motorId: id, status: 1, speed: SPEED, direction, power: 60 }));
+    const until = Date.now() + RUN_MS;
+    while (Date.now() < until && !stopping) {
+      for (const id of ids) {
+        await write(pn.motorFrame({ motorId: id, status: 1, speed: SPEED, direction, power: 60 }));
+      }
+      await delay(150);
     }
-    await delay(RUN_MS);
     for (const id of ids) {
       await write(pn.motorFrame({ motorId: id, status: 0, speed: 0, direction }));
     }
@@ -108,6 +127,7 @@ async function main() {
   }
 
   if (!stopping) {
+    clearInterval(keepaliveTimer);
     console.log('\nВимикаю силове реле моторів...');
     await write(pn.motorPowerFrame(false));
     console.log('Готово. Закриваю порт.');
