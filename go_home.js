@@ -25,22 +25,37 @@ const pn = require('./powernet');
 
 const PORT_NAME = process.env.PORT_NAME || 'COM3';
 const BAUD = Number(process.env.BAUD) || 115200;
-// Заводський DoForward/DoBackward рахує Speed за формулою
-// ((MotorDriveSpeed-32)*CartSpeedPercent+3200)/100 — для типових налаштувань
-// (MotorDriveSpeed~255, CartSpeedLow=40%) це виходить ~120, а не 10-20.
-// Малі значення (~15), схоже, нижче порогу зрушення мотора під навантаженням.
-const SPEED = Number(process.env.SPEED) || 100;
-const DIRECTION = process.env.DIRECTION !== undefined ? Number(process.env.DIRECTION) : 1; // напрямок "назад" — звірити на місці
+// Реальні числа з живого Settings.xml (%APPDATA%\JHAgroPanelApp\Settings\Settings.xml)
+// цієї машини, звірені з формулою в DoForward/DoBackward/DoBackwardToHome
+// (JHAgroPanelApp.il): Speed = ((MotorDriveSpeed-32)*CartSpeedPercent+3200)/100.
+// Motors[0] = Drive1 (id=1 у XML): MotorDriveSpeed=255, MotorDriveMaxPower=44,
+// MotorDrivePowerDelay=110, MotorDriveRumpUp=10, MotorDriveRumpDown=0.
+// Заводський стан StateBackwardMoving (автоматичний рух назад/до дому) явно
+// логує "Rail is near, DriveBackward (CartSpeedLow)" і рахує швидкість від
+// CartSpeedLow=40% — це найближчий аналог того, що робить цей скрипт (їде
+// назад, поки не зловить домашній маркер), тому дефолт побудовано на ньому:
+// ((255-32)*40+3200)/100 = 121.2 -> 121. Ручні кнопки Forward/Backward у
+// заводській панелі натомість рахують від CartSpeedNormal=70% -> 188.
+const SPEED = Number(process.env.SPEED) || 121;
+// DirectionMotorPlate=true для Drive1 у Settings.xml -> в IL це дає
+// Direction=0 для Forward і Direction=1 для Backward (перевірено в
+// DoForward/DoBackward/DoBackwardToHome — усі три гілки узгоджені).
+const DIRECTION = process.env.DIRECTION !== undefined ? Number(process.env.DIRECTION) : 1;
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS) || 60000; // запобіжник, якщо датчик не спрацює
-// Power/PowerDelay (байти 3/4 рег.7) — ліміт струму + затримка спрацювання
-// захисту. Скріншот настройок показує реальні ліміти Drive-моторів ~10А;
-// наше попереднє power=60/powerDelay=0 могло тригерити захист миттєво на
-// пусковому струмі, ще до видимого руху. Піднято за замовчуванням.
-const POWER = Number(process.env.POWER) || 200;
-const POWER_DELAY = Number(process.env.POWER_DELAY) || 50;
+// Power/PowerDelay/RampUp/RampDown (байти 3/4/6/7 рег.7) — точні значення
+// Drive1 з Settings.xml (Drive2 в тому ж файлі має ідентичні). Не наближення.
+const POWER = Number(process.env.POWER) || 44;
+const POWER_DELAY = Number(process.env.POWER_DELAY) || 110;
+const RAMP_UP = Number(process.env.RAMP_UP) || 10;
+const RAMP_DOWN = Number(process.env.RAMP_DOWN) || 0;
 
 const DRIVE_BOTH = pn.MOTOR_IDS.Drive1 | pn.MOTOR_IDS.Drive2; // = 3
-const ALL_MASK = Object.values(pn.MOTOR_IDS).reduce((m, id) => m | id, 0);
+// РЕАЛЬНА маска регістру 25 цієї машини — НЕ всі 7 моторів. З Settings.xml
+// MotorMaskDrive: true лише для Drive1, Drive2, Conveyor, Shredder (id 1,2,4,5);
+// Extra/RightPlate/LeftPlate (id 3,6,7) вимкнені в конфігурації. Раніше тут
+// стояла маска "усі 7" (127) — це розходилось із заводським конфігом і могло
+// провокувати MotorLostCommunMask на моторах, які плата не очікує задіяними.
+const REQUIRED_MASK = pn.MOTOR_IDS.Drive1 | pn.MOTOR_IDS.Drive2 | pn.MOTOR_IDS.Conveyor | pn.MOTOR_IDS.Shredder; // = 27 (0x1B)
 
 function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -131,10 +146,10 @@ async function main() {
   function driveBoth(status, direction) {
     const speed = status ? SPEED : 0;
     if (COMBINED_ID) {
-      return write(pn.motorFrame({ motorId: DRIVE_BOTH, status, speed, direction, power: POWER, powerDelay: POWER_DELAY }));
+      return write(pn.motorFrame({ motorId: DRIVE_BOTH, status, speed, direction, power: POWER, powerDelay: POWER_DELAY, rampUp: RAMP_UP, rampDown: RAMP_DOWN }));
     }
-    return write(pn.motorFrame({ motorId: pn.MOTOR_IDS.Drive1, status, speed, direction, power: POWER, powerDelay: POWER_DELAY })).then(() =>
-      write(pn.motorFrame({ motorId: pn.MOTOR_IDS.Drive2, status, speed, direction, power: POWER, powerDelay: POWER_DELAY }))
+    return write(pn.motorFrame({ motorId: pn.MOTOR_IDS.Drive1, status, speed, direction, power: POWER, powerDelay: POWER_DELAY, rampUp: RAMP_UP, rampDown: RAMP_DOWN })).then(() =>
+      write(pn.motorFrame({ motorId: pn.MOTOR_IDS.Drive2, status, speed, direction, power: POWER, powerDelay: POWER_DELAY, rampUp: RAMP_UP, rampDown: RAMP_DOWN }))
     );
   }
 
@@ -159,7 +174,7 @@ async function main() {
   process.on('SIGINT', () => emergencyStop('SIGINT (Ctrl+C)'));
   process.on('uncaughtException', (e) => emergencyStop(`помилка: ${e.message}`));
 
-  console.log(`Power=${POWER}, PowerDelay=${POWER_DELAY}`);
+  console.log(`Power=${POWER}, PowerDelay=${POWER_DELAY}, RampUp=${RAMP_UP}, RampDown=${RAMP_DOWN}, RequiredMask=${REQUIRED_MASK}`);
   await write(pn.readFrame(pn.REG.BOARD_ERROR));
   await delay(100);
 
@@ -185,7 +200,7 @@ async function main() {
   await delay(3000);
   await write(pn.readFrame(pn.REG.KEEPALIVE));
   await resetAll();
-  await write(pn.motorReqMaskFrame(ALL_MASK));
+  await write(pn.motorReqMaskFrame(REQUIRED_MASK));
   await resetAll();
 
   keepaliveTimer = setInterval(() => {

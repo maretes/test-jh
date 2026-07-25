@@ -20,14 +20,44 @@ const pn = require('./powernet');
 
 const PORT_NAME = process.env.PORT_NAME || 'COM3';
 const BAUD = Number(process.env.BAUD) || 115200;
-// Заводський формула швидкості ((MotorDriveSpeed-32)*CartSpeedPercent+3200)/100
-// для типових налаштувань дає ~120-190, а не 10-20 — малі значення, схоже,
-// нижче порогу зрушення мотора під навантаженням (перевірено на практиці).
-const SPEED = Number(process.env.SPEED) || 100;
+// Заводська формула швидкості ((MotorDriveSpeed-32)*CartSpeedPercent+3200)/100,
+// звірена з реальним Settings.xml (%APPDATA%\JHAgroPanelApp\Settings\Settings.xml)
+// цієї машини: MotorDriveSpeed=255 для всіх, крім плат (32), CartSpeedNormal=70%
+// -> ((255-32)*70+3200)/100 = 188.1 -> 188.
+const SPEED = Number(process.env.SPEED) || 188;
 const RUN_MS = Number(process.env.RUN_MS) || 3000;
 const PAUSE_MS = 1000; // пауза між кроками — встигнути побачити результат / зупинити руками
 
+// Навмисно всі 7 біт, а не реальна маска цієї машини (0x1B — див. go_home.js/
+// server.js) — цей скрипт існує саме для того, щоб фізично прозондувати й
+// Extra/RightPlate/LeftPlate, які в поточному Settings.xml вимкнені
+// (MotorMaskDrive=false), і перевірити, чи є там взагалі щось підключене.
 const ALL_MASK = Object.values(pn.MOTOR_IDS).reduce((m, id) => m | id, 0);
+
+// Per-motor Power/PowerDelay/RampUp/RampDown — точні значення з Settings.xml
+// (Motors[0..6] = Drive1, Drive2, Extra, Conveyor, Shredder, RightPlate, LeftPlate,
+// перевірено проти MotorMaskDrive->бітова маска в JHAgroPanelApp.il). Раніше тут
+// стояв один спільний power=60 для всіх моторів — це ВИЩЕ за реальний калібрувальний
+// ліміт Extra/RightPlate/LeftPlate (15), тобто фактично вимикало захист по струму
+// саме для найслабших моторів.
+// speed — за заводською формулою з MotorDriveSpeed кожного мотора (RightPlate/
+// LeftPlate каліброван на MotorDriveSpeed=32, що завжди дає Speed=32 незалежно
+// від CartSpeedPercent; решта на MotorDriveSpeed=255 -> 188 при CartSpeedNormal=70%)
+const MOTOR_CALIBRATION = {
+  Drive1: { power: 44, powerDelay: 110, rampUp: 10, rampDown: 0, speed: 188 },
+  Drive2: { power: 44, powerDelay: 110, rampUp: 10, rampDown: 0, speed: 188 },
+  Extra: { power: 15, powerDelay: 110, rampUp: 0, rampDown: 0, speed: 188 },
+  Conveyor: { power: 36, powerDelay: 110, rampUp: 10, rampDown: 0, speed: 188 },
+  Shredder: { power: 44, powerDelay: 110, rampUp: 10, rampDown: 0, speed: 188 },
+  RightPlate: { power: 15, powerDelay: 110, rampUp: 0, rampDown: 0, speed: 32 },
+  LeftPlate: { power: 15, powerDelay: 110, rampUp: 0, rampDown: 0, speed: 32 },
+};
+function calibrationForIds(ids) {
+  // Drive1+Drive2 ідентичні — для комбінованої команди (MotorID=3) досить
+  // калібрування першого
+  const name = Object.keys(pn.MOTOR_IDS).find((n) => ids.includes(pn.MOTOR_IDS[n]));
+  return MOTOR_CALIBRATION[name] || { power: 15, powerDelay: 110, rampUp: 0, rampDown: 0 };
+}
 
 function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -103,11 +133,15 @@ async function main() {
 
   async function runMotors(ids, direction, label) {
     if (stopping) return;
-    console.log(`-> ${label} (motorId=[${ids}], напрямок=${direction})`);
+    const cal = calibrationForIds(ids);
+    // SPEED з env -> явне перевизначення для всіх моторів; інакше калібрування
+    // конкретного мотора (плати каліброван на 32, решта на 188)
+    const speed = process.env.SPEED !== undefined ? SPEED : cal.speed;
+    console.log(`-> ${label} (motorId=[${ids}], напрямок=${direction}, power=${cal.power}, speed=${speed})`);
     const until = Date.now() + RUN_MS;
     while (Date.now() < until && !stopping) {
       for (const id of ids) {
-        await write(pn.motorFrame({ motorId: id, status: 1, speed: SPEED, direction, power: 60 }));
+        await write(pn.motorFrame({ ...cal, motorId: id, status: 1, speed, direction }));
       }
       await delay(150);
     }

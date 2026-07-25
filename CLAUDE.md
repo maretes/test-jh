@@ -188,6 +188,49 @@ for b in buf[1:-3]:
 > спрацьовувало, мотор не крутився) — схоже, це нижче порогу зрушення під
 > навантаженням; `Speed≈100` і вище — рухає.
 
+> **Реальні калібрувальні числа цієї машини** — з живого
+> `Settings.xml` (`%APPDATA%\JHAgroPanelApp\Settings\Settings.xml`, звірено з
+> масивом `TechnicalSettings.Motors[]` в IL). Індекси масиву відповідають
+> `Motor id` в XML (`id=N` → `Motors[N-1]`), порядок підтверджено з побудови
+> маски регістру 25 (`ManualControlViewModel`, кожен індекс OR-иться зі своїм
+> бітом `MOTOR_IDS`):
+>
+> | idx (XML id) | Мотор | MotorID біт | MaxPower | PowerDelay | RampUp | RampDown | MotorDriveSpeed | DirectionMotorPlate | MotorMaskDrive |
+> |---:|---|---:|---:|---:|---:|---:|---:|:---:|:---:|
+> | 0 (1) | Drive1 | 1 | 44 | 110 | 10 | 0 | 255 | true | **true** |
+> | 1 (2) | Drive2 | 2 | 44 | 110 | 10 | 0 | 255 | true | **true** |
+> | 2 (3) | Extra | 4 | 15 | 110 | 0 | 0 | 255 | false | false |
+> | 3 (4) | Conveyor | 16 | 36 | 110 | 10 | 0 | 255 | true | **true** |
+> | 4 (5) | Shredder | 8 | 44 | 110 | 10 | 0 | 255 | true | **true** |
+> | 5 (6) | RightPlate | 32 | 15 | 110 | 0 | 0 | 32 | false | false |
+> | 6 (7) | LeftPlate | 64 | 15 | 110 | 0 | 0 | 32 | false | false |
+>
+> `CartSpeedLow=40`, `CartSpeedNormal=70` на цій машині. Для Drive1/Drive2
+> (`MotorDriveSpeed=255`): `Speed=121` при `CartSpeedLow` (авто-рух, стан
+> `StateBackwardMoving` логує саме `"Rail is near, DriveBackward (CartSpeedLow)"`
+> біля стрілок), `Speed=188` при `CartSpeedNormal` (ручні кнопки
+> Forward/Backward/BackwardToHome в `ManualControlViewModel`).
+>
+> **Напрямок підтверджено з IL** (`DoForward`/`DoBackward`/`DoBackwardToHome`,
+> усі три узгоджені): якщо `DirectionMotorPlate`(Drive1)==true — `Forward`
+> шле `Direction=0`, `Backward`/`BackwardToHome` шлють `Direction=1`. На цій
+> машині `DirectionMotorPlate=true`, тож **`Direction=1` — це справді "назад"**,
+> як і стояло в `go_home.js` за замовчуванням (раніше — припущення "звірити
+> на місці", тепер підтверджено з коду).
+>
+> **`SetMotorRequirementsMask` (рег.25) для цієї машини = `27` (`0x1B`)** —
+> `Drive1 | Drive2 | Conveyor | Shredder`. Extra/RightPlate/LeftPlate
+> вимкнені в `Settings.xml` (`MotorMaskDrive=false`) — вони фізично не
+> встановлені або не каліброван на цій машині. `go_home.js` і `server.js`
+> тепер шлють саме цю маску, а не "усі 7" — ширша маска могла провокувати
+> `MotorLostCommunMask` на моторах, яких плата не очікує задіяними.
+>
+> Для комбінованої команди `MotorID=3` (`Drive1|Drive2`) `DoForward/DoBackward/
+> DoBackwardToHome` беруть `Power/PowerDelay/RampUp/RampDown/Direction` **лише
+> з `Motors[0]` (Drive1)** — на цій машині це неважливо, бо `Motors[1]`
+> (Drive2) має ідентичні значення, але загалом означає: калібрування Drive2
+> в `Settings.xml` для парної команди ігнорується.
+
 ### Мотори в системі
 
 З `DataExchangeTestViewModel` (вбудована тестова панель) видно набір приводів:
@@ -199,6 +242,14 @@ Drive1, Drive2, Extra, Conveyor, Shredder, RightPlate, LeftPlate
 `MotorID` підтверджено з IL (`Drive.ctor()`, `DischargeFeed.ctor()`,
 `Motor.SendMotorSettings()`) — бітова маска, не послідовні номери:
 `Drive1=1, Drive2=2, Extra=4, Shredder=8, Conveyor=16, RightPlate=32, LeftPlate=64`.
+
+> Джерело реальних калібрувальних чисел (Power/PowerDelay/RampUp/RampDown/
+> MotorDriveSpeed/DirectionMotorPlate/MotorMaskDrive за кожним мотором) —
+> `Settings.xml` заводського застосунку: `%APPDATA%\JHAgroPanelApp\Settings\
+> Settings.xml` на машині, де стоїть `JHAgroPanelApp.exe` (звичайний текстовий
+> XML). Якщо машину перекалібрують або зміниться конфігурація моторів —
+> звірити цей файл заново, таблиця в §6 нижче відповідає знімку станом на
+> 2026-07-25.
 
 > **Важливо для Drive1+Drive2:** реальний шлях руху візка (`Cart.DriveForward/
 > DriveBackward/DriveStop` → `Drive.Forward3/Backward3/Stop3`, той самий, яким
@@ -466,7 +517,8 @@ PORT_NAME=/dev/ttyUSB0 node server.js     # Windows: PORT_NAME=COM3
 1. **Реальні адреси коробочок-стрілок.** Способи: подивитися поле `Adress` у вузлі
    в редакторі маршруту; послати `Ping` (кмд 7) по адресах 1…N і дивитися регістр 29
    (`LastAddr`); або `GetCardId` (кмд 6).
-2. **Відповідність `MotorID` фізичним приводам** (Drive1/Conveyor/Shredder/…).
+2. ~~Відповідність `MotorID` фізичним приводам~~ — **з'ясовано**, див. таблицю
+   калібрування в §6 (звірено `Settings.xml` + побудова маски рег.25 в IL).
 3. **Побітова розшифровка масок помилок** регістра 4 — потрібна, щоб розуміти,
    чому мотор не стартує.
 4. **Семантика `Block`.** За назвами (`BlocksOnWay`, `IsBlockWay`, `SetUnBlock`)

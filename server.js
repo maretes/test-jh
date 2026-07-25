@@ -26,11 +26,28 @@ const POLL_MS = 150; // опитування датчиків/моторів п�
 const DEADMAN_MS = 1500; // немає сигналу від UI довше цього — стоп
 const REPLY_TIMEOUT = 200;
 
+// Реальний калібрувальний ліміт струму (MotorDriveMaxPower) з живого
+// Settings.xml цієї машини (%APPDATA%\JHAgroPanelApp\Settings\Settings.xml),
+// звірено з масивом Motors[] у JHAgroPanelApp.il (MotorMaskDrive/PowerDelay/
+// RampUp/RampDown в тому ж порядку індексів). Раніше тут був один спільний
+// power=60 за замовчуванням для всіх моторів — ВИЩЕ за реальний ліміт
+// Extra/RightPlate/LeftPlate (15), тобто дефолт фактично вимикав захист по
+// струму саме для найслабших моторів, поки оператор не встигав його опустити.
+const MOTOR_POWER_DEFAULT = {
+  Drive1: 44,
+  Drive2: 44,
+  Extra: 15,
+  Conveyor: 36,
+  Shredder: 44,
+  RightPlate: 15,
+  LeftPlate: 15,
+};
+
 // ---------------------------------------------------------------- стан
 function initialMotors() {
   const motors = {};
   for (const [name, motorId] of Object.entries(pn.MOTOR_IDS)) {
-    motors[motorId] = { motorId, name, running: false, speed: 0, direction: 0, power: 60 };
+    motors[motorId] = { motorId, name, running: false, speed: 0, direction: 0, power: MOTOR_POWER_DEFAULT[name] ?? 15 };
   }
   return motors;
 }
@@ -255,17 +272,22 @@ function pollOnce() {
 
 // Реальний застосунок при старті шле цю маску (рег.25) ДО будь-яких команд
 // руху — інакше плата, схоже, ігнорує SetMotorSettings для моторів, яких
-// немає в масці (підтверджено з IL: FeedingSystem.ctor рахує біти так само,
-// як MOTOR_IDS). Вмикаємо всі 7 — конкретна машина може мати менше приводів,
-// зайві біти нешкідливі.
-const ALL_MOTORS_MASK = Object.values(pn.MOTOR_IDS).reduce((mask, id) => mask | id, 0);
+// немає в масці. Значення нижче — НЕ "усі 7 біт", а точна маска з живого
+// Settings.xml цієї машини (ManualControlViewModel.SetMotorRequirementsMask
+// будує її з TechnicalMotorSettings[].MotorMaskDrive): для цієї машини
+// MotorMaskDrive=true лише в Drive1, Drive2, Conveyor, Shredder — Extra/
+// RightPlate/LeftPlate вимкнені в конфігурації (фізично не встановлені або
+// не каліброван). Якщо колись реально задіяти ці мотори — треба спершу
+// прописати їх у Settings.xml заводського застосунку (щоб отримати реальні
+// Power/PowerDelay/RampUp/RampDown), а вже потім розширювати цю маску.
+const REQUIRED_MOTORS_MASK = pn.MOTOR_IDS.Drive1 | pn.MOTOR_IDS.Drive2 | pn.MOTOR_IDS.Conveyor | pn.MOTOR_IDS.Shredder; // = 27 (0x1B)
 
 function startLoops() {
   send(pn.readFrame(pn.REG.VERSIONS)); // раз на старті, версії не змінюються
   send(pn.resetErrorMaskFrame({
     resetIntError: true, resetSafetyStop: true, resetMotorLostComm: true, resetMotorProtect: true,
   }));
-  send(pn.motorReqMaskFrame(ALL_MOTORS_MASK));
+  send(pn.motorReqMaskFrame(REQUIRED_MOTORS_MASK));
 
   setInterval(() => {
     send(pn.readFrame(pn.REG.KEEPALIVE));
