@@ -183,9 +183,18 @@ for b in buf[1:-3]:
 Drive1, Drive2, Extra, Conveyor, Shredder, RightPlate, LeftPlate
 ```
 
-> **Не з'ясовано:** відповідність назв конкретним `MotorID`. Треба або перевірити
-> на машині, або дошукати в `JHAgroPanelApp.il` місце, де `MotorID` присвоюється
-> для кожного приводу.
+`MotorID` підтверджено з IL (`Drive.ctor()`, `DischargeFeed.ctor()`,
+`Motor.SendMotorSettings()`) — бітова маска, не послідовні номери:
+`Drive1=1, Drive2=2, Extra=4, Shredder=8, Conveyor=16, RightPlate=32, LeftPlate=64`.
+
+> **Важливо для Drive1+Drive2:** реальний шлях руху візка (`Cart.DriveForward/
+> DriveBackward/DriveStop` → `Drive.Forward3/Backward3/Stop3`, той самий, яким
+> користується `StateGoToHome`/`StateBackwardMoving`) шле **одну** команду
+> регістру 7 з `MotorID = 3` (= `1 | 2`, обидва біти разом), а не дві окремі
+> команди з ID=1 і ID=2. Схоже, плата апаратно підтримує синхронний рух пари
+> моторів через комбінований MotorID в одному кадрі — саме так гарантується,
+> що вони завжди рухаються разом. **Не перевірено на живому залізі**, але дві
+> окремі команди (ID=1, ID=2) в тесті результату не дали.
 
 ### Зворотний зв'язок (регістр 5)
 
