@@ -1,0 +1,17 @@
+{
+  "name": "powernet-panel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Тестова панель PowerNet — розвозчик сіна JH Agro",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "mock": "MOCK=1 node server.js",
+    "verify": "node verify.js",
+    "scan": "node scan.js"
+  },
+  "dependencies": {
+    "serialport": "^12.0.0",
+    "ws": "^8.21.1"
+  }
+}

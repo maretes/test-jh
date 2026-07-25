@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>PowerNet — тестова панель</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header id="topbar">
+  <div id="connStatus" class="pill pill-off">З'ЄДНАННЯ…</div>
+  <div id="estopStatus" class="pill pill-off">E-STOP</div>
+  <button id="bigStop" class="danger-btn">СТОП УСЕ</button>
+</header>
+
+<div id="errorBar" class="hidden"></div>
+
+<main>
+
+<details open class="panel">
+  <summary>Звʼязок і плата</summary>
+  <div class="grid2">
+    <div>Порт: <span id="portName">—</span></div>
+    <div>Остання відповідь: <span id="lastReplyAgo">—</span></div>
+    <div>SW/HW версії: <span id="versions">—</span></div>
+    <div>Остання помилка: <span id="lastErrorText">—</span></div>
+  </div>
+  <p class="note">Напруга АКБ (рег.1): <span id="battery">—</span> — формат не підтверджений,
+    звір з мультиметром на АКБ і скажи, який кандидат правильний.</p>
+</details>
+
+<details open class="panel">
+  <summary>Мотори</summary>
+  <label class="switchRow">
+    <input type="checkbox" id="motorPowerToggle" />
+    <span>Силове реле моторів (рег. 17) — без нього мотори не рухаються</span>
+  </label>
+  <div id="motorCards" class="cards"></div>
+</details>
+
+<details class="panel">
+  <summary>Датчики</summary>
+  <div class="grid2" id="sensorGrid"></div>
+</details>
+
+<details class="panel">
+  <summary>Приводи / IO</summary>
+  <div class="cards" id="ioCards"></div>
+</details>
+
+<details class="panel">
+  <summary>Стрілки</summary>
+
+  <h3>Пряма адреса (рег. 28)</h3>
+  <div class="row wrap">
+    <label>Адреса <input type="number" id="swAddr" value="1" min="0" max="255" style="width:5em"/></label>
+    <button data-cmd="posA">Положення A</button>
+    <button data-cmd="posB">Положення B</button>
+    <button data-cmd="stop" class="warn">Стоп (0, неперевірено)</button>
+    <button data-cmd="ping">Ping</button>
+    <button data-cmd="cardid">GetCardId</button>
+    <button data-cmd="reset" class="warn">Reset</button>
+  </div>
+
+  <h3>Таблиця зони (рег. 19)</h3>
+  <div class="row wrap">
+    <label>К-сть перемикачів <input type="number" id="swCount" value="2" min="1" max="20" style="width:4em"/></label>
+    <button id="swBuildTable">Оновити таблицю</button>
+    <label>Таймаут <input type="number" id="swTimeout" value="20" min="0" max="255" style="width:4em"/></label>
+  </div>
+  <div id="swTable" class="cards"></div>
+  <div class="row wrap">
+    <button data-tcmd="1">CheckIn</button>
+    <button data-tcmd="2">SetWay</button>
+    <button data-tcmd="3" class="warn">CheckOut</button>
+  </div>
+
+  <div class="grid2">
+    <div>WirelessACK: <span id="wAck">—</span></div>
+    <div>WirelessState: <span id="wState">—</span></div>
+    <div>WirelessEvent: <span id="wEvent">—</span></div>
+    <div>SwitchZoneState: <span id="wZone">—</span></div>
+  </div>
+</details>
+
+<details class="panel">
+  <summary>Погрузчик (Hopper)</summary>
+  <p class="note">Погрузчик керується так само, як стрілка (рег. 28): команда 1/2
+    = почати завантаження (реле A/B за IsB), команда 0 = стоп. <b>Стоп-команда
+    виведена з декомпільованого коду і не перевірена на живому вузлі</b> — перший
+    тест роби обережно. Альтернативний канал — ІЧ (рег. 8).</p>
+  <div class="row wrap">
+    <label>Адреса <input type="number" id="hopAddr" value="1" min="0" max="255" style="width:5em"/></label>
+    <button data-hop="1">Почати завантаження A</button>
+    <button data-hop="2">Почати завантаження B</button>
+    <button data-hop="0" class="warn">Стоп</button>
+  </div>
+  <div class="row wrap">
+    <label class="switchRow"><input type="checkbox" id="hopIr"/> ІЧ-канал (рег. 8)</label>
+    <label class="switchRow"><input type="checkbox" id="hopCharge"/> Заряд на цьому вузлі (рег. 16)</label>
+  </div>
+  <div>Вага корму (рег. 12): <span id="hopWeight">—</span></div>
+</details>
+
+<details class="panel">
+  <summary>Журнал кадрів</summary>
+  <div id="frameLog" class="frameLog"></div>
+</details>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

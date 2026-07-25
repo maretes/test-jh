@@ -1,36 +1,64 @@
 'use strict';
 /**
- * Керуюче ядро панелі розвозчика.
+ * Керуюче ядро тестової панелі розвозчика.
  *
  * Володіє COM-портом і НІКОЛИ не залежить від інтерфейсу:
- * якщо браузер завис, закрився чи згорів Wi-Fi — мотор зупиняється сам.
+ * якщо браузер завис, закрився чи згорів Wi-Fi — усе, що рухається, зупиняється саме.
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { SerialPort } = require('serialport');
 const { WebSocketServer } = require('ws');
 const pn = require('./powernet');
 
 // ---------------------------------------------------------------- налаштування
 const PORT_NAME = process.env.PORT_NAME || 'COM3'; // Linux: /dev/ttyUSB0
-const BAUD = 115200;
-const HTTP_PORT = 8080;
+// Підтверджено скануванням на живій платі (COM1 @ 115200 дав валідну
+// відповідь на keepalive). Раніша "тиша" на 115200 була через те, що
+// заводський застосунок тримав порт одночасно (два майстри на лінії).
+const BAUD = Number(process.env.BAUD) || 115200;
+const HTTP_PORT = Number(process.env.HTTP_PORT) || 8080;
+const MOCK = process.env.MOCK === '1' || process.argv.includes('--mock');
 
 const KEEPALIVE_MS = 300; // плата чекає регулярних повідомлень
-const POLL_MS = 150; // опитування датчиків
+const POLL_MS = 150; // опитування датчиків/моторів по черзі
 const DEADMAN_MS = 1500; // немає сигналу від UI довше цього — стоп
 const REPLY_TIMEOUT = 200;
 
 // ---------------------------------------------------------------- стан
+function initialMotors() {
+  const motors = {};
+  for (const [name, motorId] of Object.entries(pn.MOTOR_IDS)) {
+    motors[motorId] = { motorId, name, running: false, speed: 0, direction: 0, power: 60 };
+  }
+  return motors;
+}
+
 const state = {
   link: false,
-  portName: PORT_NAME,
-  motor: { running: false, speed: 0, direction: 0, motorId: 0, power: 60 },
-  feedback: null,
-  sensors: null,
-  inputs: null,
+  portName: MOCK ? '(mock)' : PORT_NAME,
+  mock: MOCK,
+  motorPower: false, // рег.17 — силове реле моторів, маст-тумблер
+  motors: initialMotors(), // motorId -> намір користувача
+  feedback: {}, // motorId -> останній декодований статус з плати (рег.6)
+  sensors: null, // рег.11
+  inputs: null, // рег.15
+  analog: null, // рег.14
+  boardError: null, // рег.4
+  foodWeight: null, // рег.12
+  versions: null, // рег.3
+  battery: null, // рег.1 keepalive — сирі байти + кандидати формул (не підтверджено)
+  io: {
+    actuator1: false, actuator2: false, // рег.13
+    impulse1: false, impulse2: false, // рег.10
+    alarm: false, // рег.9
+    charge: false, // рег.16
+    spareOut: false, // рег.18
+    ir: false, irTime: 0, // рег.8
+  },
+  wireless: { ack: null, state: null, event: null, zoneState: null },
+  frameLog: [], // останні кадри tx/rx для журналу налагодження
   lastError: null,
   lastReplyAt: 0,
 };
@@ -39,11 +67,20 @@ let port = null;
 let lastUiPing = 0;
 let rxBuffer = Buffer.alloc(0);
 
+// ---------------------------------------------------------------- журнал кадрів
+const FRAME_LOG_MAX = 80;
+function logFrame(dir, frame, extra) {
+  const hex = [...frame].map((b) => b.toString(16).padStart(2, '0')).join(' ');
+  state.frameLog.push({ ts: Date.now(), dir, hex, ...extra });
+  if (state.frameLog.length > FRAME_LOG_MAX) state.frameLog.shift();
+}
+
 // ---------------------------------------------------------------- черга запису
 // Порт один, тож кадри не можна змішувати — усе йде послідовно.
 let chain = Promise.resolve();
 
 function send(frame) {
+  logFrame('tx', frame);
   chain = chain.then(
     () =>
       new Promise((resolve) => {
@@ -76,17 +113,54 @@ function onData(chunk) {
 
     state.link = true;
     state.lastReplyAt = Date.now();
+    logFrame('rx', raw, { register: msg.register });
 
     try {
-      if (msg.register === pn.REG.MOTOR_STATUS && msg.data.length >= 8) {
-        state.feedback = pn.decodeMotorStatus(msg.data);
-      } else if (msg.register === pn.REG.SENSORS && msg.data.length >= 7) {
-        state.sensors = pn.decodeSensors(msg.data);
-      } else if (msg.register === pn.REG.DIGITAL_IN && msg.data.length >= 4) {
-        state.inputs = pn.decodeDigitalInputs(msg.data);
-        if (state.inputs.emergencyStop || state.inputs.stopButton) {
-          stopMotor('аварійна кнопка на машині');
-        }
+      switch (msg.register) {
+        case pn.REG.KEEPALIVE:
+          if (msg.data.length >= 2) state.battery = pn.decodeKeepAlive(msg.data);
+          break;
+        case pn.REG.MOTOR_STATUS_BY_ID:
+          if (msg.data.length >= 8) {
+            const fb = pn.decodeMotorStatus(msg.data);
+            state.feedback[fb.motorId] = fb;
+          }
+          break;
+        case pn.REG.SENSORS:
+          if (msg.data.length >= 7) state.sensors = pn.decodeSensors(msg.data);
+          break;
+        case pn.REG.DIGITAL_IN:
+          if (msg.data.length >= 4) {
+            state.inputs = pn.decodeDigitalInputs(msg.data);
+            if (state.inputs.emergencyStop || state.inputs.stopButton) {
+              haltAllMotion('аварійна кнопка на машині');
+            }
+          }
+          break;
+        case pn.REG.ANALOG_IN:
+          state.analog = pn.decodeAnalogIn(msg.data);
+          break;
+        case pn.REG.BOARD_ERROR:
+          state.boardError = pn.decodeBoardError(msg.data);
+          break;
+        case pn.REG.FOOD_WEIGHT:
+          state.foodWeight = pn.decodeFoodWeight(msg.data);
+          break;
+        case pn.REG.VERSIONS:
+          state.versions = pn.decodeVersions(msg.data);
+          break;
+        case pn.REG.WIRELESS_ACK:
+          state.wireless.ack = pn.decodeWirelessAck(msg.data);
+          break;
+        case pn.REG.WIRELESS_STATE:
+          state.wireless.state = pn.decodeWirelessState(msg.data);
+          break;
+        case pn.REG.WIRELESS_EVENT:
+          state.wireless.event = pn.decodeWirelessEvent(msg.data);
+          break;
+        case pn.REG.SWITCH_ZONE_STATE:
+          state.wireless.zoneState = pn.decodeSwitchZoneState(msg.data);
+          break;
       }
     } catch (e) {
       state.lastError = e.message;
@@ -94,9 +168,15 @@ function onData(chunk) {
   }
 }
 
-// ---------------------------------------------------------------- мотор
-function applyMotor() {
-  const m = state.motor;
+// ---------------------------------------------------------------- безпека
+function canMove() {
+  return state.link && !(state.inputs && (state.inputs.emergencyStop || state.inputs.stopButton));
+}
+
+// ---------------------------------------------------------------- мотори
+function applyMotor(motorId) {
+  const m = state.motors[motorId];
+  if (!m) return Promise.resolve();
   return send(
     pn.motorFrame({
       motorId: m.motorId,
@@ -108,20 +188,70 @@ function applyMotor() {
   );
 }
 
-function stopMotor(reason) {
-  if (state.motor.running) {
-    state.motor.running = false;
-    state.motor.speed = 0;
-    state.lastError = reason ? `Зупинено: ${reason}` : null;
+function stopMotor(motorId, reason) {
+  const m = state.motors[motorId];
+  if (!m) return Promise.resolve();
+  if (m.running) {
+    m.running = false;
+    m.speed = 0;
+    if (reason) state.lastError = `Зупинено (${m.name}): ${reason}`;
   }
-  return applyMotor();
+  return applyMotor(motorId);
+}
+
+function stopAllMotors(reason) {
+  return Promise.all(Object.keys(state.motors).map((id) => stopMotor(Number(id), reason)));
+}
+
+/** Повна зупинка всього, що може рухатись: мотори + актуатори + імпульси + ІЧ. */
+function haltAllMotion(reason) {
+  stopAllMotors(reason);
+  if (state.io.actuator1 || state.io.actuator2) {
+    state.io.actuator1 = false;
+    state.io.actuator2 = false;
+    send(pn.actuatorsFrame(false, false));
+  }
+  if (state.io.impulse1 || state.io.impulse2) {
+    state.io.impulse1 = false;
+    state.io.impulse2 = false;
+    send(pn.impulseOutFrame(false, false));
+  }
+  if (state.io.ir) {
+    state.io.ir = false;
+    send(pn.irFrame({ enable: false }));
+  }
+  if (reason) state.lastError = `Аварійна зупинка: ${reason}`;
 }
 
 // ---------------------------------------------------------------- цикли
+const STATIC_POLL_REGS = [
+  pn.REG.SENSORS,
+  pn.REG.DIGITAL_IN,
+  pn.REG.ANALOG_IN,
+  pn.REG.BOARD_ERROR,
+  pn.REG.FOOD_WEIGHT,
+  pn.REG.WIRELESS_ACK,
+  pn.REG.WIRELESS_STATE,
+  pn.REG.WIRELESS_EVENT,
+  pn.REG.SWITCH_ZONE_STATE,
+];
+const motorIds = Object.keys(state.motors).map(Number);
 let pollIndex = 0;
-const POLL_REGS = [pn.REG.MOTOR_STATUS, pn.REG.SENSORS, pn.REG.DIGITAL_IN];
+
+function pollOnce() {
+  const totalSlots = STATIC_POLL_REGS.length + motorIds.length;
+  const slot = pollIndex++ % totalSlots;
+  if (slot < STATIC_POLL_REGS.length) {
+    send(pn.readFrame(STATIC_POLL_REGS[slot]));
+  } else {
+    const motorId = motorIds[slot - STATIC_POLL_REGS.length];
+    send(pn.motorStatusByIdFrame(motorId));
+  }
+}
 
 function startLoops() {
+  send(pn.readFrame(pn.REG.VERSIONS)); // раз на старті, версії не змінюються
+
   setInterval(() => {
     send(pn.readFrame(pn.REG.KEEPALIVE));
 
@@ -129,20 +259,23 @@ function startLoops() {
     if (Date.now() - state.lastReplyAt > 2000) {
       if (state.link) state.lastError = 'Немає відповіді від плати';
       state.link = false;
-      if (state.motor.running) stopMotor('втрачено зв’язок із платою');
+      haltAllMotion('втрачено зв’язок із платою');
     }
   }, KEEPALIVE_MS);
 
   setInterval(() => {
-    send(pn.readFrame(POLL_REGS[pollIndex++ % POLL_REGS.length]));
+    pollOnce();
 
-    // мертвий вимикач: інтерфейс мовчить — глушимо мотор
-    if (state.motor.running && Date.now() - lastUiPing > DEADMAN_MS) {
-      stopMotor('панель не відповідає');
+    // мертвий вимикач: інтерфейс мовчить — глушимо все, що рухається
+    const anyRunning = Object.values(state.motors).some((m) => m.running);
+    if (anyRunning && Date.now() - lastUiPing > DEADMAN_MS) {
+      haltAllMotion('панель не відповідає');
     }
 
-    // мотор під напругою — підтверджуємо команду регулярно
-    if (state.motor.running) applyMotor();
+    // мотори під напругою — підтверджуємо команду регулярно
+    for (const id of motorIds) {
+      if (state.motors[id].running) applyMotor(id);
+    }
   }, POLL_MS);
 
   setInterval(broadcast, 200);
@@ -150,6 +283,15 @@ function startLoops() {
 
 // ---------------------------------------------------------------- порт
 function openPort() {
+  if (MOCK) {
+    const { createFakePort } = require('./fakeboard');
+    port = createFakePort();
+    port.on('data', onData);
+    console.log('Mock-режим: плата імітується, реальний COM-порт не використовується.');
+    return;
+  }
+
+  const { SerialPort } = require('serialport');
   port = new SerialPort(
     { path: PORT_NAME, baudRate: BAUD, dataBits: 8, parity: 'none', stopBits: 1 },
     (err) => {
@@ -166,7 +308,7 @@ function openPort() {
   });
   port.on('close', () => {
     state.link = false;
-    setTimeout(openPort, 2000);
+    if (!MOCK) setTimeout(openPort, 2000);
   });
 }
 
@@ -191,6 +333,10 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 const clients = new Set();
 
+function clampByte(v) {
+  return Math.max(0, Math.min(255, v | 0));
+}
+
 wss.on('connection', (ws) => {
   clients.add(ws);
   lastUiPing = Date.now();
@@ -205,35 +351,122 @@ wss.on('connection', (ws) => {
     }
     lastUiPing = Date.now();
 
-    if (m.cmd === 'ping') return;
-
-    if (m.cmd === 'stop') return void stopMotor(null);
-
-    if (m.cmd === 'run') {
-      if (state.inputs && (state.inputs.emergencyStop || state.inputs.stopButton)) {
-        state.lastError = 'Аварійна кнопка активна — пуск заблоковано';
+    switch (m.cmd) {
+      case 'ping':
         return;
-      }
-      if (!state.link) {
-        state.lastError = 'Немає зв’язку з платою';
-        return;
-      }
-      state.motor.running = true;
-      state.motor.speed = Math.max(0, Math.min(255, m.speed | 0));
-      state.motor.direction = m.direction ? 1 : 0;
-      if (typeof m.power === 'number') state.motor.power = m.power | 0;
-      return void applyMotor();
-    }
 
-    if (m.cmd === 'speed' && state.motor.running) {
-      state.motor.speed = Math.max(0, Math.min(255, m.speed | 0));
-      return void applyMotor();
+      case 'stop': // велика червона кнопка — зупинити все, що рухається
+        return void haltAllMotion(null);
+
+      case 'motorPower': {
+        if (m.on && !canMove()) {
+          state.lastError = 'Немає зв’язку або активна аварійна кнопка — реле не вмикається';
+          return;
+        }
+        state.motorPower = !!m.on;
+        if (!state.motorPower) stopAllMotors('вимкнено силове реле');
+        return void send(pn.motorPowerFrame(state.motorPower));
+      }
+
+      case 'run': {
+        const motorId = m.motorId | 0;
+        const mo = state.motors[motorId];
+        if (!mo) return;
+        if (!state.motorPower) {
+          state.lastError = 'Спершу увімкни силове реле моторів';
+          return;
+        }
+        if (!canMove()) {
+          state.lastError = 'Немає зв’язку або активна аварійна кнопка — пуск заблоковано';
+          return;
+        }
+        mo.running = true;
+        mo.speed = clampByte(m.speed);
+        mo.direction = m.direction ? 1 : 0;
+        if (typeof m.power === 'number') mo.power = clampByte(m.power);
+        return void applyMotor(motorId);
+      }
+
+      case 'motorStop':
+        return void stopMotor(m.motorId | 0, null);
+
+      case 'speed': {
+        const mo = state.motors[m.motorId | 0];
+        if (!mo || !mo.running) return;
+        mo.speed = clampByte(m.speed);
+        return void applyMotor(m.motorId | 0);
+      }
+
+      case 'actuator': {
+        if (m.on && !canMove()) return;
+        if (m.index === 1) state.io.actuator1 = !!m.on;
+        else if (m.index === 2) state.io.actuator2 = !!m.on;
+        return void send(pn.actuatorsFrame(state.io.actuator1, state.io.actuator2));
+      }
+
+      case 'impulse': {
+        if (m.on && !canMove()) return;
+        if (m.index === 1) state.io.impulse1 = !!m.on;
+        else if (m.index === 2) state.io.impulse2 = !!m.on;
+        return void send(pn.impulseOutFrame(state.io.impulse1, state.io.impulse2));
+      }
+
+      case 'alarm':
+        state.io.alarm = !!m.on;
+        return void send(pn.alarmFrame(state.io.alarm));
+
+      case 'charge':
+        state.io.charge = !!m.on;
+        return void send(pn.chargeFrame(state.io.charge));
+
+      case 'spareOut':
+        if (m.on && !canMove()) return;
+        state.io.spareOut = !!m.on;
+        return void send(pn.spareOutFrame(state.io.spareOut));
+
+      case 'ir': {
+        if (m.enable && !canMove()) return;
+        state.io.ir = !!m.enable;
+        state.io.irTime = m.time | 0;
+        return void send(pn.irFrame({ enable: state.io.ir, time: state.io.irTime }));
+      }
+
+      case 'wirelessCommand': {
+        const address = m.address | 0;
+        const command = m.command | 0;
+        // положення A/B (1/2) — рух вузла, решта (0=стоп,3=CheckOut,4..8) завжди дозволені
+        const isMotion = command === pn.WIRELESS_CMD.POSITION_A || command === pn.WIRELESS_CMD.POSITION_B;
+        if (isMotion && !canMove()) {
+          state.lastError = 'Немає зв’язку або активна аварійна кнопка — команду заблоковано';
+          return;
+        }
+        return void send(pn.wirelessCommandFrame(address, command));
+      }
+
+      case 'wirelessTable': {
+        const cmd = m.cmd2 | 0; // 1=CheckIn,2=SetWay,3=CheckOut
+        const isMotion = cmd === pn.WIRELESS_CMD.CHECK_IN || cmd === pn.WIRELESS_CMD.SET_WAY;
+        if (isMotion && !canMove()) {
+          state.lastError = 'Немає зв’язку або активна аварійна кнопка — команду заблоковано';
+          return;
+        }
+        return void send(pn.wirelessTableFrame(cmd, m.switches || [], m.timeout));
+      }
+
+      case 'resetErrorMask':
+        return void send(pn.resetErrorMaskFrame(m.flags || {}));
+
+      case 'switchAmount':
+        return void send(pn.switchAmountFrame(m.count | 0));
+
+      case 'motorReqMask':
+        return void send(pn.motorReqMaskFrame(m.mask | 0));
     }
   });
 
   ws.on('close', () => {
     clients.delete(ws);
-    if (clients.size === 0) stopMotor('панель відключилась');
+    if (clients.size === 0) haltAllMotion('панель відключилась');
   });
 });
 
@@ -246,12 +479,14 @@ function broadcast() {
 
 // ---------------------------------------------------------------- запуск/зупинка
 function shutdown() {
-  console.log('\nЗупиняю мотор і закриваю порт…');
-  state.motor.running = false;
-  const frame = pn.motorFrame({ motorId: state.motor.motorId, status: 0, speed: 0 });
+  console.log('\nЗупиняю все і закриваю порт…');
+  for (const id of motorIds) {
+    const m = state.motors[id];
+    m.running = false;
+    if (port && port.isOpen) port.write(pn.motorFrame({ motorId: m.motorId, status: 0, speed: 0 }));
+  }
   try {
     if (port && port.isOpen) {
-      port.write(frame);
       port.drain(() => port.close(() => process.exit(0)));
       setTimeout(() => process.exit(0), 500);
       return;
@@ -271,5 +506,5 @@ openPort();
 startLoops();
 server.listen(HTTP_PORT, () => {
   console.log(`Панель:  http://localhost:${HTTP_PORT}`);
-  console.log(`Порт:    ${PORT_NAME} @ ${BAUD} 8N1`);
+  console.log(MOCK ? 'Порт:    mock (без реальної плати)' : `Порт:    ${PORT_NAME} @ ${BAUD} 8N1`);
 });

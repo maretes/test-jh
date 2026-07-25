@@ -15,12 +15,59 @@ const REG = {
   KEEPALIVE: 1,
   VERSIONS: 3,
   BOARD_ERROR: 4,
-  MOTOR_STATUS: 5,
+  MOTOR_STATUS: 5, // R: статус "поточного" мотора; W: ResetErrorMask
+  MOTOR_STATUS_BY_ID: 6,
   MOTOR_SETTINGS: 7,
+  IR_STATE: 8,
+  ALARM_STATE: 9,
+  IMPULSE_OUT: 10,
   SENSORS: 11,
   FOOD_WEIGHT: 12,
+  ACTUATORS: 13,
   ANALOG_IN: 14,
   DIGITAL_IN: 15,
+  CHARGE_STATE: 16,
+  MOTOR_STATE: 17, // силове реле моторів
+  SPARE_OUT1: 18,
+  WIRELESS_TABLE: 19,
+  RESET_SWITCH_ZONE: 20,
+  SWITCH_AMOUNT: 21,
+  WIRELESS_ACK: 22,
+  SWITCH_ZONE_STATE: 23,
+  MOTOR_REQ_MASK: 25,
+  WIRELESS_STATE: 26,
+  WIRELESS_CMD: 28, // пряма адресна команда вузлу (стрілка/погрузчик)
+  WIRELESS_EVENT: 29,
+  // Регістр 2 (ForceToBootloaderMode) навмисно відсутній — не чіпати.
+};
+
+// Бітові маски MotorID (register 7/25) — не послідовні номери!
+// Підтверджено дизасемблюванням Drive/DischargeFeed ctor у v2.2.311.
+const MOTOR_IDS = {
+  Drive1: 1,
+  Drive2: 2,
+  Extra: 4,
+  Shredder: 8,
+  Conveyor: 16,
+  RightPlate: 32,
+  LeftPlate: 64,
+};
+
+// Прямі адресні команди вузла (регістр 28). 1/2 = положення A/B, 0 = стоп
+// (недокументоване значення, виведене з коду StateHopper — не перевірено
+// на залізі). Решта — зі словника EWirelessState.
+const WIRELESS_CMD = {
+  STOP: 0,
+  POSITION_A: 1,
+  POSITION_B: 2,
+  CHECK_IN: 1,
+  SET_WAY: 2,
+  CHECK_OUT: 3,
+  RESET: 4,
+  SET_SW_AMOUNT: 5,
+  GET_CARD_ID: 6,
+  PING: 7,
+  SEND_DIRECTION: 8,
 };
 
 const LOCAL_ADDR = 0;
@@ -167,6 +214,104 @@ function readFrame(register) {
   return buildFrame([], register, { rw: RW.READ });
 }
 
+/** Запит статусу конкретного мотора за MotorID (регістр 6). */
+function motorStatusByIdFrame(motorId) {
+  return buildFrame([motorId & 0xff], REG.MOTOR_STATUS_BY_ID, { rw: RW.READ });
+}
+
+/** Скид масок помилок (регістр 5, запис). */
+function resetErrorMaskFrame({
+  resetIntError = false,
+  resetSafetyStop = false,
+  resetMotorLostComm = false,
+  resetMotorProtect = false,
+} = {}) {
+  const data = [resetIntError, resetSafetyStop, resetMotorLostComm, resetMotorProtect].map((b) =>
+    b ? 1 : 0
+  );
+  return buildFrame(data, REG.MOTOR_STATUS, { rw: RW.WRITE });
+}
+
+/** ІЧ-канал (регістр 8): enable + час (мс, 16 біт). */
+function irFrame({ enable = false, time = 0 }) {
+  return buildFrame([enable ? 1 : 0, time & 0xff, (time >>> 8) & 0xff], REG.IR_STATE);
+}
+
+/** Сирена (регістр 9). */
+function alarmFrame(on) {
+  return buildFrame([on ? 1 : 0], REG.ALARM_STATE);
+}
+
+/** Два імпульсні виходи (регістр 10). */
+function impulseOutFrame(out1, out2) {
+  return buildFrame([out1 ? 1 : 0, out2 ? 1 : 0], REG.IMPULSE_OUT);
+}
+
+/** Два актуатори на візку (регістр 13). */
+function actuatorsFrame(a1, a2) {
+  return buildFrame([a1 ? 1 : 0, a2 ? 1 : 0], REG.ACTUATORS);
+}
+
+/** Реле заряду (регістр 16). */
+function chargeFrame(on) {
+  return buildFrame([on ? 1 : 0], REG.CHARGE_STATE);
+}
+
+/** Силове реле моторів (регістр 17) — маст-тумблер, без нього мотори не рухаються. */
+function motorPowerFrame(on) {
+  return buildFrame([on ? 1 : 0], REG.MOTOR_STATE);
+}
+
+/** Запасний вихід (регістр 18). */
+function spareOutFrame(on) {
+  return buildFrame([on ? 1 : 0], REG.SPARE_OUT1);
+}
+
+/** Скид зони стрілок (регістр 20, 3 байти — семантика полів не з'ясована). */
+function resetSwitchZoneFrame(bytes = [0, 0, 0]) {
+  return buildFrame([bytes[0] & 0xff, bytes[1] & 0xff, bytes[2] & 0xff], REG.RESET_SWITCH_ZONE);
+}
+
+/** Кількість стрілок (регістр 21, запис, 2 байти). */
+function switchAmountFrame(count) {
+  return buildFrame([count & 0xff, (count >>> 8) & 0xff], REG.SWITCH_AMOUNT);
+}
+
+/** Маска задіяних моторів (регістр 25, бітова, як MOTOR_IDS). */
+function motorReqMaskFrame(mask) {
+  return buildFrame([mask & 0xff, (mask >>> 8) & 0xff], REG.MOTOR_REQ_MASK);
+}
+
+/**
+ * Пряма адресна команда вузлу (регістр 28) — стрілка або погрузчик.
+ * command: 1/2 = положення A/B (RailSwitcher/StandaloneSwitch/Hopper),
+ * 0 = стоп (неперевірено на залізі), 6 = GetCardId, 7 = Ping, і т.д.
+ */
+function wirelessCommandFrame(address, command) {
+  return buildFrame([address & 0xff, command & 0xff], REG.WIRELESS_CMD);
+}
+
+/**
+ * Таблиця зони стрілок (регістр 19). switches — масив об'єктів
+ * {index (1-based, 1..20), position (0/1), update (bool), block (bool)}.
+ * Тільки стрілки з update=true будуть змінені вузлом; решта лишаються як є.
+ * cmd: 1=CheckIn, 2=SetWay, 3=CheckOut (WIRELESS_CMD.CHECK_IN/SET_WAY/CHECK_OUT).
+ */
+function wirelessTableFrame(cmd, switches = [], timeout = 20) {
+  const table = new Array(10).fill(0);
+  for (const sw of switches) {
+    if (!sw || !sw.index || sw.index < 1 || sw.index > 20) continue;
+    const byteIndex = Math.floor((sw.index - 1) / 2);
+    const shift = (sw.index - 1) % 2 === 0 ? 0 : 4;
+    let bits = 0;
+    if (sw.position) bits |= 0x01;
+    if (sw.update) bits |= 0x02;
+    if (sw.block) bits |= 0x04;
+    table[byteIndex] |= bits << shift;
+  }
+  return buildFrame([cmd & 0xff, ...table, timeout & 0xff], REG.WIRELESS_TABLE);
+}
+
 // ---------------------------------------------------------------- декодери
 function decodeMotorStatus(d) {
   return {
@@ -198,12 +343,107 @@ function decodeDigitalInputs(d) {
     resetButton: !!d[1],
     emergencyStop: !!d[2],
     weightingInput: !!d[3],
+    spareInput1: !!d[4],
+    spareInput2: !!d[5],
   };
 }
 
+/** Регістр 4 — маски помилок. Побітова розшифровка не з'ясована (CLAUDE.md §12.3). */
+function decodeBoardError(d) {
+  const u16 = (i) => d[i] | (d[i + 1] << 8);
+  return {
+    internalErrorMask: d.length >= 2 ? u16(0) : null,
+    motorLostCommunMask: d.length >= 4 ? u16(2) : null,
+    motorProtectionTriggeringMask: d.length >= 6 ? u16(4) : null,
+    raw: [...d],
+  };
+}
+
+/**
+ * Регістр 14 — аналогові входи. Байтова ширина полів не підтверджена в IL;
+ * якщо прийшло >=12 байт, читаємо як 6 uint16 LE, інакше віддаємо сирі байти.
+ * Значення потребують звірки на залізі.
+ */
+function decodeAnalogIn(d) {
+  if (d.length >= 12) {
+    const u16 = (i) => d[i] | (d[i + 1] << 8);
+    return {
+      voltageInput1: u16(0),
+      voltageInput2: u16(2),
+      voltageInput3: u16(4),
+      voltageCharge: u16(6),
+      currentInput1: u16(8),
+      currentInput2: u16(10),
+      raw: [...d],
+    };
+  }
+  return { raw: [...d] };
+}
+
+/** Регістр 3 — версії SW/HW. Точний формат не підтверджений, віддаємо сирі байти. */
+function decodeVersions(d) {
+  return { raw: [...d] };
+}
+
+/** Регістр 22 — підтвердження від вузла (WirelessACK). */
+function decodeWirelessAck(d) {
+  return {
+    status: d[0],
+    nodeId: d[1],
+    relayStatus: d[2],
+    switchPosition: d[3],
+  };
+}
+
+/** Регістр 26 — стан радіомодуля. */
+function decodeWirelessState(d) {
+  return { state: d[0], lastCommand: d[1] };
+}
+
+/** Регістр 29 — подія від радіо (GetEventWirelessCommand). */
+function decodeWirelessEvent(d) {
+  return { lastAddr: d[0], state: d[1] };
+}
+
+/** Регістр 23 — стан поточної зони стрілок. Формат не з'ясований, сирі байти. */
+function decodeSwitchZoneState(d) {
+  return { raw: [...d] };
+}
+
+/**
+ * Регістр 1 — keepalive: 2 байти, за CLAUDE.md "звʼязок + напруга АКБ".
+ * Точний формат (порядок байтів, деци- чи мілівольти) не підтверджений —
+ * живий семпл [97,34] неоднозначний. Даємо кілька кандидатів для звірки
+ * з мультиметром на АКБ; після підтвердження лишити один варіант.
+ */
+function decodeKeepAlive(d) {
+  if (d.length >= 2) {
+    const le = d[0] | (d[1] << 8);
+    const be = (d[0] << 8) | d[1];
+    return {
+      raw: [...d],
+      candidates: { leDeciVolts: le / 10, beDeciVolts: be / 10, leMilliVolts: le / 1000, beMilliVolts: be / 1000 },
+    };
+  }
+  return { raw: [...d] };
+}
+
+/** Регістр 12 — вага корму. Формат байтів не підтверджений в IL (float32 LE — припущення). */
+function decodeFoodWeight(d) {
+  if (d.length >= 4) {
+    return { weight: Buffer.from(d).readFloatLE(0), raw: [...d] };
+  }
+  return { raw: [...d] };
+}
+
 module.exports = {
-  FLAG, ESC, MSG, RW, REG, LOCAL_ADDR, REMOTE_ADDR,
+  FLAG, ESC, MSG, RW, REG, LOCAL_ADDR, REMOTE_ADDR, MOTOR_IDS, WIRELESS_CMD,
   crc16, buildFrame, unstuff, parseFrame, extractFrames,
-  motorFrame, readFrame,
-  decodeMotorStatus, decodeSensors, decodeDigitalInputs,
+  motorFrame, readFrame, motorStatusByIdFrame, resetErrorMaskFrame,
+  irFrame, alarmFrame, impulseOutFrame, actuatorsFrame, chargeFrame,
+  motorPowerFrame, spareOutFrame, resetSwitchZoneFrame, switchAmountFrame,
+  motorReqMaskFrame, wirelessCommandFrame, wirelessTableFrame,
+  decodeMotorStatus, decodeSensors, decodeDigitalInputs, decodeBoardError,
+  decodeAnalogIn, decodeVersions, decodeWirelessAck, decodeWirelessState,
+  decodeWirelessEvent, decodeSwitchZoneState, decodeFoodWeight, decodeKeepAlive,
 };
