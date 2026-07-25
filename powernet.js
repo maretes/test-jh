@@ -327,25 +327,40 @@ function decodeMotorStatus(d) {
   };
 }
 
+// Регістр 11, відповідь: РІВНО 2 байти (не 7, як гадали раніше за назвами
+// полів у CLAUDE.md §7). Підтверджено з IL (BoardProtocolProvider,
+// MessageInductiveOpticalSensor) — п'ять булевих прапорців упаковані в один
+// байт-бітове поле, PositionMarkerCounter — uint8 (не uint16):
+//   d[0]: біт0=IsInHomeMarker, біт1=IsInPosMarker, біт2=IsFullSensorOpen,
+//         біт3=IsEmptySensorOpen, біт4=IsFrontSensorOpen
+//   d[1]: PositionMarkerCounter (0-255, з переповненням)
+// Звірено з живим кадром із плати: data=[12,16] -> fullSensorOpen+
+// emptySensorOpen=true, лічильник=16.
 function decodeSensors(d) {
+  const b = d[0];
   return {
-    inHomeMarker: !!d[0],
-    inPosMarker: !!d[1],
-    fullSensorOpen: !!d[2],
-    emptySensorOpen: !!d[3],
-    frontSensorOpen: !!d[4],
-    positionCounter: d[5] | (d[6] << 8),
+    inHomeMarker: !!(b & 0x01),
+    inPosMarker: !!(b & 0x02),
+    fullSensorOpen: !!(b & 0x04),
+    emptySensorOpen: !!(b & 0x08),
+    frontSensorOpen: !!(b & 0x10),
+    positionCounter: d[1],
   };
 }
 
+// Регістр 15, відповідь: РІВНО 1 байт (не 6, як гадали раніше) — бітове поле,
+// підтверджено з IL (BoardProtocolProvider, MessageDigitalInputs):
+//   біт0=StopButton, біт1=ResetButton, біт2=EmergencyStopButton,
+//   біт3=WeightingInput, біт4=SpareInput1, біт5=SpareInput2
 function decodeDigitalInputs(d) {
+  const b = d[0];
   return {
-    stopButton: !!d[0],
-    resetButton: !!d[1],
-    emergencyStop: !!d[2],
-    weightingInput: !!d[3],
-    spareInput1: !!d[4],
-    spareInput2: !!d[5],
+    stopButton: !!(b & 0x01),
+    resetButton: !!(b & 0x02),
+    emergencyStop: !!(b & 0x04),
+    weightingInput: !!(b & 0x08),
+    spareInput1: !!(b & 0x10),
+    spareInput2: !!(b & 0x20),
   };
 }
 

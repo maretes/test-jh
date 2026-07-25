@@ -89,8 +89,10 @@ async function main() {
 
   let rxBuf = Buffer.alloc(0);
   let sensors = null;
+  let inputs = null;
   let boardError = null;
   let lastPrintedError = null;
+  let lastPrintedInputs = null;
   // рег.6 не ехоїть MotorID — трекаємо чергу запитів (плата відповідає
   // в тому ж порядку, в якому питали, оскільки лінія напівдуплексна)
   const pendingMotorStatus = [];
@@ -107,8 +109,19 @@ async function main() {
         continue;
       }
       console.log(`rx рег=${msg.register} тип=${msg.messageType} write=${msg.isWrite} data=[${[...msg.data]}]`);
-      if (msg.register === pn.REG.SENSORS && msg.data.length >= 7) {
+      // рег.11 реально повертає 2 байти (бітове поле + PositionMarkerCounter),
+      // не 7, як гадали раніше — підтверджено з IL і живим кадром цієї плати.
+      if (msg.register === pn.REG.SENSORS && msg.data.length >= 2) {
         sensors = pn.decodeSensors(msg.data);
+      }
+      // рег.15 — 1 байт, бітове поле (StopButton/ResetButton/EmergencyStopButton/…).
+      if (msg.register === pn.REG.DIGITAL_IN && msg.data.length >= 1) {
+        inputs = pn.decodeDigitalInputs(msg.data);
+        const key = JSON.stringify(inputs);
+        if (key !== lastPrintedInputs) {
+          lastPrintedInputs = key;
+          console.log(`\n[рег.15 входи] stop=${inputs.stopButton} eStop=${inputs.emergencyStop} reset=${inputs.resetButton} weighting=${inputs.weightingInput}`);
+        }
       }
       if (msg.register === pn.REG.BOARD_ERROR) {
         boardError = pn.decodeBoardError(msg.data);
@@ -178,6 +191,23 @@ async function main() {
   await write(pn.readFrame(pn.REG.BOARD_ERROR));
   await delay(100);
 
+  // Перевірка рег.15 ДО будь-якого руху — раніше цей скрипт не читав його
+  // взагалі, хоча CLAUDE.md §11 явно вимагає це перед пуском. Плата приймає
+  // й ACK-ить SetMotorSettings навіть коли фізично заблокована (реле клацає,
+  // status у рег.6 залишається 0) — якщо StopButton/EmergencyStopButton
+  // натиснуті, руху не буде незалежно від того, що ми шлемо в рег.7.
+  console.log('Перевірка рег.15 (StopButton/EmergencyStopButton) перед стартом...');
+  await write(pn.readFrame(pn.REG.DIGITAL_IN));
+  await delay(150);
+  if (inputs && (inputs.stopButton || inputs.emergencyStop)) {
+    console.log(`\nСТОП: рег.15 показує stop=${inputs.stopButton} eStop=${inputs.emergencyStop} — фізичну кнопку не відпущено. Відпусти E-Stop/Stop і перезапусти.`);
+    port.close(() => process.exit(1));
+    return;
+  }
+  if (!inputs) {
+    console.log('УВАГА: не отримав відповідь на рег.15 — не можу підтвердити стан E-Stop/Stop. Перевір лінію.');
+  }
+
   const resetAll = () =>
     write(pn.resetErrorMaskFrame({
       resetIntError: true, resetSafetyStop: true, resetMotorLostComm: true, resetMotorProtect: true,
@@ -217,10 +247,16 @@ async function main() {
     await driveBoth(1, DIRECTION);
     await write(pn.readFrame(pn.REG.SENSORS));
     await write(pn.readFrame(pn.REG.BOARD_ERROR));
+    await write(pn.readFrame(pn.REG.DIGITAL_IN));
     await readMotorStatus(DRIVE_BOTH);
     await readMotorStatus(pn.MOTOR_IDS.Drive1);
     await readMotorStatus(pn.MOTOR_IDS.Drive2);
     await delay(150);
+
+    if (inputs && (inputs.stopButton || inputs.emergencyStop)) {
+      await emergencyStop(`рег.15: stop=${inputs.stopButton} eStop=${inputs.emergencyStop}`);
+      break;
+    }
 
     const isHome = !!(sensors && sensors.inHomeMarker);
     if (isHome && !wasHome) {
