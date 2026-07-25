@@ -249,8 +249,19 @@ function pollOnce() {
   }
 }
 
+// Реальний застосунок при старті шле цю маску (рег.25) ДО будь-яких команд
+// руху — інакше плата, схоже, ігнорує SetMotorSettings для моторів, яких
+// немає в масці (підтверджено з IL: FeedingSystem.ctor рахує біти так само,
+// як MOTOR_IDS). Вмикаємо всі 7 — конкретна машина може мати менше приводів,
+// зайві біти нешкідливі.
+const ALL_MOTORS_MASK = Object.values(pn.MOTOR_IDS).reduce((mask, id) => mask | id, 0);
+
 function startLoops() {
   send(pn.readFrame(pn.REG.VERSIONS)); // раз на старті, версії не змінюються
+  send(pn.resetErrorMaskFrame({
+    resetIntError: true, resetSafetyStop: true, resetMotorLostComm: true, resetMotorProtect: true,
+  }));
+  send(pn.motorReqMaskFrame(ALL_MOTORS_MASK));
 
   setInterval(() => {
     send(pn.readFrame(pn.REG.KEEPALIVE));
