@@ -9,7 +9,8 @@
  * а не двома окремими (1 і 2) — так шле реальний застосунок
  * (Drive.Backward3/Stop3), і це, схоже, обов'язково для плати.
  *
- * ПЕРЕД ЗАПУСКОМ: колеса підняті або трансмісія розчеплена, фізичний
+ * ПЕРЕД ЗАПУСКОМ: візок підвісний, відчепити привід від руху не можна —
+ * щойно мотор реально спрацює, візок поїде по рейці. Шлях вільний, фізичний
  * аварійний стоп під рукою, заводський застосунок закритий.
  *
  * Використання:
@@ -48,7 +49,8 @@ function delay(ms) {
 async function main() {
   console.log('=== Повернення додому ===');
   console.log(`Порт: ${PORT_NAME} @ ${BAUD} 8N1, швидкість=${SPEED}, напрямок=${DIRECTION}, таймаут=${TIMEOUT_MS}мс`);
-  console.log('Колеса підняті / трансмісія розчеплена? Аварійний стоп під рукою?');
+  console.log('Візок підвісний — коліс/трансмісії, які можна відчепити, немає.');
+  console.log('Щойно поїде — поїде реально по рейці. Шлях вільний? Аварійний стоп під рукою?');
   console.log('Старт через 3с... (Ctrl+C щоб перервати)');
   await delay(3000);
 
@@ -121,16 +123,31 @@ async function main() {
   console.log(`Power=${POWER}, PowerDelay=${POWER_DELAY}`);
   await write(pn.readFrame(pn.REG.BOARD_ERROR));
   await delay(100);
-  console.log('Ініціалізація: скид помилок + маска задіяних моторів (рег.25)...');
-  await write(pn.resetErrorMaskFrame({
-    resetIntError: true, resetSafetyStop: true, resetMotorLostComm: true, resetMotorProtect: true,
-  }));
-  await write(pn.motorReqMaskFrame(ALL_MASK));
-  await delay(200);
 
+  const resetAll = () =>
+    write(pn.resetErrorMaskFrame({
+      resetIntError: true, resetSafetyStop: true, resetMotorLostComm: true, resetMotorProtect: true,
+    }));
+
+  // Точна послідовність запуску з FeedingSystem.BwBoardDE_DoWork (кнопка
+  // Start у заводському застосунку) — раніше пропущений крок: імпульсний
+  // вихід (рег.10) на 1с ПЕРЕД увімкненням силового реле, довші паузи.
+  console.log('Boot-послідовність (як при натисканні Start у заводському застосунку)...');
+  await write(pn.readFrame(pn.REG.KEEPALIVE));
+  await write(pn.impulseOutFrame(true, false)); // рег.10, вихід1=ON
+  console.log('Імпульсний вихід1 ON, чекаю 1с...');
+  await delay(1000);
+  await resetAll();
   console.log('Силове реле моторів (рег.17) — увімкнення...');
   await write(pn.motorPowerFrame(true));
-  await delay(300);
+  await write(pn.impulseOutFrame(false, false)); // рег.10, вихід1=OFF
+  await resetAll();
+  console.log('Чекаю 3с (як у заводській послідовності)...');
+  await delay(3000);
+  await write(pn.readFrame(pn.REG.KEEPALIVE));
+  await resetAll();
+  await write(pn.motorReqMaskFrame(ALL_MASK));
+  await resetAll();
 
   keepaliveTimer = setInterval(() => {
     if (!stopping) write(pn.readFrame(pn.REG.KEEPALIVE));
