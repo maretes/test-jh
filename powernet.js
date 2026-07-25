@@ -143,7 +143,7 @@ function unstuff(frame) {
 function parseFrame(frame) {
   if (frame.length < 8) return null;
   const b = unstuff(frame);
-  if (b.length < 7) return null;
+  if (b.length < 6) return null;
 
   const got = b[b.length - 2] | (b[b.length - 1] << 8);
   const check = Buffer.concat([Buffer.from([0]), b.slice(0, -2)]);
@@ -313,16 +313,17 @@ function wirelessTableFrame(cmd, switches = [], timeout = 20) {
 }
 
 // ---------------------------------------------------------------- декодери
+/** Регістр 6, відповідь: 7 байт, БЕЗ ехо MotorID (плата знає, ти й так питав
+ * конкретний ID) — підтверджено живим кадром, не 8 байт, як гадали раніше. */
 function decodeMotorStatus(d) {
   return {
-    motorId: d[0],
-    status: d[1],
-    power: d[2],
-    powerDelay: d[3],
-    speed: d[4],
-    rampUp: d[5],
-    rampDown: d[6],
-    direction: d[7],
+    status: d[0],
+    power: d[1],
+    powerDelay: d[2],
+    speed: d[3],
+    rampUp: d[4],
+    rampDown: d[5],
+    direction: d[6],
   };
 }
 

@@ -121,9 +121,9 @@ function onData(chunk) {
           if (msg.data.length >= 2) state.battery = pn.decodeKeepAlive(msg.data);
           break;
         case pn.REG.MOTOR_STATUS_BY_ID:
-          if (msg.data.length >= 8) {
-            const fb = pn.decodeMotorStatus(msg.data);
-            state.feedback[fb.motorId] = fb;
+          if (!msg.isWrite && msg.data.length >= 7 && pendingMotorStatusId !== null) {
+            state.feedback[pendingMotorStatusId] = pn.decodeMotorStatus(msg.data);
+            pendingMotorStatusId = null;
           }
           break;
         case pn.REG.SENSORS:
@@ -237,6 +237,9 @@ const STATIC_POLL_REGS = [
 ];
 const motorIds = Object.keys(state.motors).map(Number);
 let pollIndex = 0;
+// рег.6 не ехоїть MotorID у відповіді — трекаємо, якого мотора питали
+// останнім (опитування послідовне, один запит за раз)
+let pendingMotorStatusId = null;
 
 function pollOnce() {
   const totalSlots = STATIC_POLL_REGS.length + motorIds.length;
@@ -245,6 +248,7 @@ function pollOnce() {
     send(pn.readFrame(STATIC_POLL_REGS[slot]));
   } else {
     const motorId = motorIds[slot - STATIC_POLL_REGS.length];
+    pendingMotorStatusId = motorId;
     send(pn.motorStatusByIdFrame(motorId));
   }
 }

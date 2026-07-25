@@ -76,7 +76,11 @@ async function main() {
   let sensors = null;
   let boardError = null;
   let lastPrintedError = null;
-  let lastPrintedMotorStatus = null;
+  // рег.6 не ехоїть MotorID — трекаємо чергу запитів (плата відповідає
+  // в тому ж порядку, в якому питали, оскільки лінія напівдуплексна)
+  const pendingMotorStatus = [];
+  const lastPrintedMotorStatus = {};
+
   port.on('data', (chunk) => {
     rxBuf = Buffer.concat([rxBuf, chunk]);
     const { frames, rest } = pn.extractFrames(rxBuf);
@@ -99,12 +103,13 @@ async function main() {
           console.log(`\n[рег.4 маска помилок] int=${boardError.internalErrorMask} lost=${boardError.motorLostCommunMask} protect=${boardError.motorProtectionTriggeringMask} raw=[${boardError.raw}]`);
         }
       }
-      if (msg.register === pn.REG.MOTOR_STATUS_BY_ID && msg.data.length >= 8) {
+      if (msg.register === pn.REG.MOTOR_STATUS_BY_ID && !msg.isWrite && msg.data.length >= 7) {
+        const id = pendingMotorStatus.shift();
         const fb = pn.decodeMotorStatus(msg.data);
         const key = JSON.stringify(fb);
-        if (key !== lastPrintedMotorStatus) {
-          lastPrintedMotorStatus = key;
-          console.log(`\n[рег.6 статус мотора] id=${fb.motorId} status=${fb.status} speed=${fb.speed} power=${fb.power} dir=${fb.direction}`);
+        if (key !== lastPrintedMotorStatus[id]) {
+          lastPrintedMotorStatus[id] = key;
+          console.log(`\n[рег.6 статус мотора] id=${id} status=${fb.status} speed=${fb.speed} power=${fb.power} dir=${fb.direction}`);
         }
       }
     }
@@ -115,6 +120,11 @@ async function main() {
       motorId: DRIVE_BOTH, status, speed: status ? SPEED : 0, direction,
       power: POWER, powerDelay: POWER_DELAY,
     }));
+  }
+
+  function readMotorStatus(id) {
+    pendingMotorStatus.push(id);
+    return write(pn.motorStatusByIdFrame(id));
   }
 
   let stopping = false;
@@ -176,9 +186,9 @@ async function main() {
     await driveBoth(1, DIRECTION);
     await write(pn.readFrame(pn.REG.SENSORS));
     await write(pn.readFrame(pn.REG.BOARD_ERROR));
-    await write(pn.motorStatusByIdFrame(DRIVE_BOTH));
-    await write(pn.motorStatusByIdFrame(pn.MOTOR_IDS.Drive1));
-    await write(pn.motorStatusByIdFrame(pn.MOTOR_IDS.Drive2));
+    await readMotorStatus(DRIVE_BOTH);
+    await readMotorStatus(pn.MOTOR_IDS.Drive1);
+    await readMotorStatus(pn.MOTOR_IDS.Drive2);
     await delay(150);
 
     const isHome = !!(sensors && sensors.inHomeMarker);
