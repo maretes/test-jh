@@ -209,24 +209,29 @@ async function main() {
       resetIntError: true, resetSafetyStop: true, resetMotorLostComm: true, resetMotorProtect: true,
     }));
 
-  // Точна послідовність запуску з FeedingSystem.BwBoardDE_DoWork (кнопка
-  // Start у заводському застосунку) — раніше пропущений крок: імпульсний
-  // вихід (рег.10) на 1с ПЕРЕД увімкненням силового реле, довші паузи.
-  console.log('Boot-послідовність (як при натисканні Start у заводському застосунку)...');
+  // Точна послідовність запуску з ManualControlViewModel.BwBoardDE_DoWork
+  // (кнопка Start САМЕ на тій панелі, чиї DoForward/DoBackward/
+  // DoBackwardToHome ми копіюємо для калібрування — не FeedingSystem, це
+  // окремий, набагато складніший клас для автоматичного маршруту, і його
+  // послідовність відрізняється). Раніше тут стояла помилкова версія:
+  // ResetErrorMask ДО реле і 3с пауза — реально реле вмикається ПЕРШИМ,
+  // а пауза після нього лише 1с:
+  //   KeepAlive() -> ImpulseOut(ON) -> Sleep(1000) -> SetMotorRelay(true)
+  //   -> ImpulseOut(OFF) -> Sleep(1000) -> ResetErrorMask -> SetMotorReqMask
+  //   -> KeepAlive() -> ResetErrorMask
+  console.log('Boot-послідовність (ManualControlViewModel.BwBoardDE_DoWork)...');
   await write(pn.readFrame(pn.REG.KEEPALIVE));
   await write(pn.impulseOutFrame(true, false)); // рег.10, вихід1=ON
   console.log('Імпульсний вихід1 ON, чекаю 1с...');
   await delay(1000);
-  await resetAll();
   console.log('Силове реле моторів (рег.17) — увімкнення...');
   await write(pn.motorPowerFrame(true));
   await write(pn.impulseOutFrame(false, false)); // рег.10, вихід1=OFF
-  await resetAll();
-  console.log('Чекаю 3с (як у заводській послідовності)...');
-  await delay(3000);
-  await write(pn.readFrame(pn.REG.KEEPALIVE));
+  console.log('Чекаю 1с...');
+  await delay(1000);
   await resetAll();
   await write(pn.motorReqMaskFrame(REQUIRED_MASK));
+  await write(pn.readFrame(pn.REG.KEEPALIVE));
   await resetAll();
 
   // Друга перевірка рег.15 — після boot-послідовності, той самий

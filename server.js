@@ -144,13 +144,21 @@ function onData(chunk) {
           }
           break;
         case pn.REG.SENSORS:
-          if (msg.data.length >= 7) state.sensors = pn.decodeSensors(msg.data);
+          // Рег.11 реально повертає 2 байти, не 7 — виправлено після
+          // першого живого тесту (CLAUDE.md §7), decodeSensors тепер сам
+          // читає з d[0]/d[1].
+          if (msg.data.length >= 2) state.sensors = pn.decodeSensors(msg.data);
           break;
         case pn.REG.DIGITAL_IN:
-          if (msg.data.length >= 4) {
+          // Рег.15 реально повертає 1 байт, не 4+ — і StopButton
+          // ІНВЕРТОВАНИЙ: 1 = контур цілий/ОК, 0 = реально зупинено.
+          // Підтверджено з IL (FeedingSystem: EmergencystopState =
+          // (StopButton==1) ? false : true). EmergencyStopButton/
+          // ResetButton у застосунку ніде НЕ гейтують рух напряму.
+          if (msg.data.length >= 1) {
             state.inputs = pn.decodeDigitalInputs(msg.data);
-            if (state.inputs.emergencyStop || state.inputs.stopButton) {
-              haltAllMotion('аварійна кнопка на машині');
+            if (!state.inputs.stopButton) {
+              haltAllMotion('контур Stop/E-Stop розімкнено (StopButton=0)');
             }
           }
           break;
@@ -187,7 +195,7 @@ function onData(chunk) {
 
 // ---------------------------------------------------------------- безпека
 function canMove() {
-  return state.link && !(state.inputs && (state.inputs.emergencyStop || state.inputs.stopButton));
+  return state.link && !(state.inputs && !state.inputs.stopButton);
 }
 
 // ---------------------------------------------------------------- мотори
