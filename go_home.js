@@ -76,6 +76,7 @@ async function main() {
   let sensors = null;
   let boardError = null;
   let lastPrintedError = null;
+  let lastPrintedMotorStatus = null;
   port.on('data', (chunk) => {
     rxBuf = Buffer.concat([rxBuf, chunk]);
     const { frames, rest } = pn.extractFrames(rxBuf);
@@ -92,6 +93,14 @@ async function main() {
         if (key !== lastPrintedError) {
           lastPrintedError = key;
           console.log(`\n[рег.4 маска помилок] int=${boardError.internalErrorMask} lost=${boardError.motorLostCommunMask} protect=${boardError.motorProtectionTriggeringMask} raw=[${boardError.raw}]`);
+        }
+      }
+      if (msg.register === pn.REG.MOTOR_STATUS_BY_ID && msg.data.length >= 8) {
+        const fb = pn.decodeMotorStatus(msg.data);
+        const key = JSON.stringify(fb);
+        if (key !== lastPrintedMotorStatus) {
+          lastPrintedMotorStatus = key;
+          console.log(`\n[рег.6 статус мотора] id=${fb.motorId} status=${fb.status} speed=${fb.speed} power=${fb.power} dir=${fb.direction}`);
         }
       }
     }
@@ -163,6 +172,9 @@ async function main() {
     await driveBoth(1, DIRECTION);
     await write(pn.readFrame(pn.REG.SENSORS));
     await write(pn.readFrame(pn.REG.BOARD_ERROR));
+    await write(pn.motorStatusByIdFrame(DRIVE_BOTH));
+    await write(pn.motorStatusByIdFrame(pn.MOTOR_IDS.Drive1));
+    await write(pn.motorStatusByIdFrame(pn.MOTOR_IDS.Drive2));
     await delay(150);
 
     const isHome = !!(sensors && sensors.inHomeMarker);
