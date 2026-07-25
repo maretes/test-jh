@@ -83,7 +83,11 @@ async function main() {
     rxBuf = rest;
     for (const raw of frames) {
       const msg = pn.parseFrame(raw);
-      if (!msg) continue;
+      if (!msg) {
+        console.log(`rx НЕВАЛІДНИЙ КАДР (CRC?): ${[...raw].map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
+        continue;
+      }
+      console.log(`rx рег=${msg.register} тип=${msg.messageType} write=${msg.isWrite} data=[${[...msg.data]}]`);
       if (msg.register === pn.REG.SENSORS && msg.data.length >= 7) {
         sensors = pn.decodeSensors(msg.data);
       }
