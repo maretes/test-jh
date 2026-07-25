@@ -191,15 +191,16 @@ async function main() {
   await write(pn.readFrame(pn.REG.BOARD_ERROR));
   await delay(100);
 
-  // Рання перевірка рег.15 — лише інформаційна. На живій платі (2026-07-25)
-  // тут виявили stop=true eStop=true reset=true одночасно, ще ДО жодного
-  // ResetErrorMask — схоже на "клямку", яку знімає саме reset-послідовність
-  // (так само, як вона знімає маску помилок рег.4), а не на живий стан
-  // фізичної кнопки: у заводській панелі просто "Старт" — і їде, а Start
-  // якраз і виконує цю ж послідовність (FeedingSystem.BwBoardDE_DoWork).
-  // Тому тут більше НЕ абортуємо — рішучу перевірку робимо нижче, ПІСЛЯ
-  // повної boot-послідовності з усіма ResetErrorMask.
-  console.log('Перевірка рег.15 (інформаційно, до reset-послідовності)...');
+  // Рег.15 StopButton — ІНВЕРТОВАНИЙ біт, підтверджено з IL
+  // (FeedingSystem: обробник MessageDigitalInputs рахує
+  // `EmergencystopState = (StopButton == 1) ? false : true`). Тобто
+  // StopButton=1 означає "контур цілий, НЕ зупинено", а 0 — реальний
+  // E-Stop/Stop. EmergencyStopButton/ResetButton біти в цій єдиній
+  // гейтуючій формулі заводського коду взагалі не використовуються — не
+  // гейтуємо на них і ми. Раніше тут стояла протилежна (непідтверджена)
+  // умова — саме вона хибно блокувала попередній запуск, хоча плата була
+  // повністю готова їхати.
+  console.log('Перевірка рег.15 (StopButton, інвертовано за FeedingSystem з IL)...');
   await write(pn.readFrame(pn.REG.DIGITAL_IN));
   await delay(150);
 
@@ -228,20 +229,19 @@ async function main() {
   await write(pn.motorReqMaskFrame(REQUIRED_MASK));
   await resetAll();
 
-  // Рішуча перевірка рег.15 — ПІСЛЯ повної boot-послідовності. Якщо клямка
-  // не знялась і зараз, це вже не "стан до reset", а справжня блокуюча
-  // умова — тут абортуємо.
+  // Друга перевірка рег.15 — після boot-послідовності, той самий
+  // (інвертований) гейт: абортуємо лише якщо StopButton==0.
   console.log('Перевірка рег.15 після boot-послідовності...');
   await write(pn.readFrame(pn.REG.DIGITAL_IN));
   await delay(150);
-  if (inputs && (inputs.stopButton || inputs.emergencyStop)) {
-    console.log(`\nСТОП: рег.15 після reset все одно показує stop=${inputs.stopButton} eStop=${inputs.emergencyStop} — це вже не "стан до скидання". Перевір фізичну кнопку/роз'єм.`);
+  if (inputs && !inputs.stopButton) {
+    console.log(`\nСТОП: рег.15 показує StopButton=0 — контур Stop/E-Stop розімкнено. Перевір фізичну кнопку/роз'єм.`);
     await write(pn.motorPowerFrame(false));
     port.close(() => process.exit(1));
     return;
   }
   if (!inputs) {
-    console.log('УВАГА: не отримав відповідь на рег.15 після reset — не можу підтвердити стан E-Stop/Stop.');
+    console.log('УВАГА: не отримав відповідь на рег.15 після reset — не можу підтвердити стан Stop-контуру.');
   }
 
   keepaliveTimer = setInterval(() => {
@@ -264,8 +264,8 @@ async function main() {
     await readMotorStatus(pn.MOTOR_IDS.Drive2);
     await delay(150);
 
-    if (inputs && (inputs.stopButton || inputs.emergencyStop)) {
-      await emergencyStop(`рег.15: stop=${inputs.stopButton} eStop=${inputs.emergencyStop}`);
+    if (inputs && !inputs.stopButton) {
+      await emergencyStop(`рег.15: StopButton=0 (контур Stop/E-Stop розімкнено)`);
       break;
     }
 
