@@ -52,9 +52,8 @@ function render(state) {
   document.getElementById('versions').textContent = state.versions ? JSON.stringify(state.versions.raw || state.versions) : '—';
 
   const bat = state.battery;
-  document.getElementById('battery').textContent = bat
-    ? `сирі=[${bat.raw}] leDeci=${bat.candidates.leDeciVolts}В beDeci=${bat.candidates.beDeciVolts}В leMilli=${bat.candidates.leMilliVolts}В beMilli=${bat.candidates.beMilliVolts}В`
-    : '—';
+  document.getElementById('battery').textContent =
+    bat && bat.voltage !== undefined ? `${bat.voltage.toFixed(2)} В` : '—';
 
   if (state.lastReplyAt) {
     const sec = Math.max(0, Math.round((Date.now() - state.lastReplyAt) / 1000));

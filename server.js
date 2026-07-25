@@ -340,6 +340,10 @@ function clampByte(v) {
 wss.on('connection', (ws) => {
   clients.add(ws);
   lastUiPing = Date.now();
+  // старий "панель відключилась" не має висіти вічно — свіже підключення
+  // означає, що оператор знову тут; реальна проблема (плата/E-Stop) все
+  // одно перевиставиться в найближчому циклі опитування, якщо ще актуальна
+  if (state.lastError === 'Аварійна зупинка: панель відключилась') state.lastError = null;
   ws.send(JSON.stringify({ type: 'state', state }));
 
   ws.on('message', (raw) => {
